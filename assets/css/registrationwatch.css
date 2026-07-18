@@ -3,7 +3,7 @@
  * Keep this light and let FreePBX/Bootstrap provide the main admin styling.
  */
 
-body:has(.registrationwatch) #page_body.default-page {
+body:has(.registrationwatch) #page_body {
 	display: block !important;
 	width: 100% !important;
 	max-width: 100% !important;
