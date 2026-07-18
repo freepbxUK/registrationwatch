@@ -2,11 +2,12 @@
 	<rawname>registrationwatch</rawname>
 	<repo>unsupported</repo>
 	<name>Registration Watch</name>
-	<version>1.2.0</version>
+	<version>1.2.1</version>
 	<publisher>20tele.com</publisher>
 	<license>GPLv3+</license>
 	<licenselink>http://www.gnu.org/licenses/gpl-3.0.txt</licenselink>
 	<changelog>
+		*1.2.1* Focused patch release for FreePBX 17. Fixes the Registration Watch admin page expanding to desktop content width on narrow and mobile viewports because of the FreePBX page-body table layout. Wide tables continue to scroll locally. Desktop behaviour and module runtime logic are unchanged.
 		*1.2.0* Initial Registration Watch release for FreePBX 17. Adds SIP registration status visibility, status history, alert history, and email alerting for watched registrations. Sets Storm Threshold to 20 by default, with 0 available to disable it. Adds reconcile locking and auto-disables registrations that remain absent for 30 days.
 	</changelog>
 	<category>Reports</category>

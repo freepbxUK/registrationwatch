@@ -3,6 +3,12 @@
  * Keep this light and let FreePBX/Bootstrap provide the main admin styling.
  */
 
+body:has(.registrationwatch) #page_body {
+	display: block !important;
+	width: 100% !important;
+	max-width: 100% !important;
+}
+
 .registrationwatch .rw-ready {
 	margin-top: 12px;
 }
@@ -308,8 +314,15 @@
 	margin-top: 4px;
 }
 
+.registrationwatch #rw-topology-container {
+	overflow-x: auto;
+	overflow-y: hidden;
+	-webkit-overflow-scrolling: touch;
+}
+
 .registrationwatch .rw-map-row-view {
-	width: 100%;
+	width: max-content;
+	min-width: 100%;
 	margin-bottom: 0;
 }
 
