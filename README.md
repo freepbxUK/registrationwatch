@@ -1,4 +1,4 @@
-# Registration Watch 1.2.0 for FreePBX 17
+# Registration Watch 1.2.1 for FreePBX 17
 
 Registration Watch (`registrationwatch`) watches PJSIP registration state in
 FreePBX/PBXact 17. It discovers configured FreePBX PJSIP devices and tracks
@@ -16,9 +16,10 @@ device or system.
 
 ## Release Status
 
-Registration Watch 1.2.0 is the first release that reflects the settled
-direction of the module. Earlier versions were pilot releases used to prove the
-original idea and alert behaviour.
+Registration Watch 1.2.1 is the current patch release for FreePBX 17. Version
+1.2.0 was the first release that reflected the settled direction of the module;
+earlier versions were pilot releases used to prove the original idea and alert
+behaviour.
 
 Use the `main` branch for stable releases. Development and release-candidate
 branches may contain incomplete or test-only changes.
@@ -276,6 +277,8 @@ does not send alert emails.
 The Registration Watch admin page is available under **Reports > Registration Watch**
 and contains the following sections:
 
+The admin page supports narrow and mobile viewports, while wide data tables retain local horizontal scrolling.
+
 * **Monitoring banner** -- shows the current monitoring state (active, inactive, or snoozed) with Snooze/Resume controls.
 * **Registration Status Map** -- shows all discovered registrations. Supports Cards and Rows views. The Row view has sortable columns.
 * **Alert Settings** -- configures recipients, alert triggers, debounce, repeat alerts, storm threshold, and topology polling.
@@ -369,6 +372,12 @@ This module has been developed with AI assistance for code generation, review, t
 @kierknoby, Kieran Knowles-Byrne // FreePBX UK
 
 ## Release History
+
+### 1.2.1, patch release, 18 July 2026
+
+Released by `@kierknoby, Kieran Knowles-Byrne // FreePBX UK`.
+
+This focused patch fixes the Registration Watch admin page expanding to desktop content width on narrow and mobile viewports because of the FreePBX page-body table layout. Wide tables continue to scroll locally, and desktop behaviour and module runtime logic are unchanged.
 
 ### 1.2.0, minor release, 17 June 2026
 
