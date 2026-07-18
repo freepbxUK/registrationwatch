@@ -314,8 +314,15 @@ body:has(.registrationwatch) #page_body {
 	margin-top: 4px;
 }
 
+.registrationwatch #rw-topology-container {
+	overflow-x: auto;
+	overflow-y: hidden;
+	-webkit-overflow-scrolling: touch;
+}
+
 .registrationwatch .rw-map-row-view {
-	width: 100%;
+	width: max-content;
+	min-width: 100%;
 	margin-bottom: 0;
 }
 

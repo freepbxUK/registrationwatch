@@ -11,6 +11,8 @@ function assert_true(bool $condition, string $message): void {
 $registrationWatchCss = file_get_contents(__DIR__ . '/../assets/css/registrationwatch.css');
 assert_true($registrationWatchCss !== false, 'Registration Watch CSS should be readable');
 assert_true(strpos($registrationWatchCss, "body:has(.registrationwatch) #page_body {\n\tdisplay: block !important;\n\twidth: 100% !important;\n\tmax-width: 100% !important;\n}") !== false, 'Registration Watch CSS should include exact scoped FreePBX page body override');
+assert_true(strpos($registrationWatchCss, ".registrationwatch #rw-topology-container {\n\toverflow-x: auto;\n\toverflow-y: hidden;\n\t-webkit-overflow-scrolling: touch;\n}") !== false, 'Registration Watch CSS should include exact scoped topology scroll container override');
+assert_true(strpos($registrationWatchCss, ".registrationwatch .rw-map-row-view {\n\twidth: max-content;\n\tmin-width: 100%;\n\tmargin-bottom: 0;\n}") !== false, 'Registration Watch CSS should include exact scoped map row width override');
 
 function registration_key(string $extension, string $sourceIp, string $uaClass = ''): string {
 	$basis = strtolower(trim($extension)) . "\0" . strtolower(trim($sourceIp));
