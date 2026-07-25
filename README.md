@@ -1,7 +1,7 @@
-# Registration Watch 1.2.1 for FreePBX 17
+# Registration Watch 1.3.0 for FreePBX 16 and 17
 
 Registration Watch (`registrationwatch`) watches PJSIP registration state in
-FreePBX/PBXact 17. It discovers configured FreePBX PJSIP devices and tracks
+FreePBX/PBXact 16 and 17. It discovers configured FreePBX PJSIP devices and tracks
 their registration and contact state, recording state changes and sending email
 alerts when watched registrations become unavailable or recover.
 
@@ -16,7 +16,7 @@ device or system.
 
 ## Release Status
 
-Registration Watch 1.2.1 is the current patch release for FreePBX 17. Version
+Registration Watch 1.3.0 is the current release for FreePBX 16 and 17. Version
 1.2.0 was the first release that reflected the settled direction of the module;
 earlier versions were pilot releases used to prove the original idea and alert
 behaviour.
@@ -26,11 +26,11 @@ branches may contain incomplete or test-only changes.
 
 ## Compatibility
 
-Use with FreePBX/PBXact 17 only. Do not install on FreePBX/PBXact 16 or below.
+Use with FreePBX/PBXact 16 or 17.
 
 ## Requirements
 
-* FreePBX/PBXact 17
+* FreePBX/PBXact 16 or 17
 * PJSIP channel driver
 * Existing FreePBX PJSIP extensions/devices
 * Asterisk Manager access available to FreePBX
@@ -337,9 +337,10 @@ php -l uninstall.php
 php -l views/main.php
 php -r '$xml = simplexml_load_file("module.xml"); echo $xml ? "module.xml parsed\n" : "module.xml failed\n";'
 php tests/repeat_alerting_contract.php
+php tests/version_compatibility_contract.php
 ```
 
-On a real FreePBX/PBXact 17 system:
+On a real FreePBX/PBXact 16 or 17 system:
 
 ```sh
 fwconsole reload
@@ -372,6 +373,12 @@ This module has been developed with AI assistance for code generation, review, t
 @kierknoby, Kieran Knowles-Byrne // FreePBX UK
 
 ## Release History
+
+### 1.3.0, minor release, 25 July 2026
+
+Released by `@kierknoby, Kieran Knowles-Byrne // FreePBX UK`.
+
+This release adds FreePBX 16 support while retaining FreePBX 17 compatibility, uses shared module metadata for both supported versions, and widens registration notes from 48 to 72 characters when upgrading existing installations.
 
 ### 1.2.1, patch release, 18 July 2026
 
