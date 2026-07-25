@@ -113,6 +113,14 @@ fwconsole reload
 
 ### Option 2: Update from GitHub
 
+After the first installation, fwconsole chown may cause Git to reject the module directory because it is owned by the FreePBX web user rather than root. Add the directory to Git's safe-directory list once:
+
+```sh
+git config --global --add safe.directory /var/www/html/admin/modules/registrationwatch
+```
+
+Then update the module:
+
 ```sh
 cd /var/www/html/admin/modules/registrationwatch
 git fetch origin main
