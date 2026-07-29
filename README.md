@@ -426,6 +426,16 @@ extensions whose contact identity changes.
 * Reuses the existing watched registration where continuity can be determined unambiguously.
 * Preserves genuine simultaneous multi-contact registrations by refusing to guess when multiple candidates exist.
 
+#### Automatic handover safeguards
+
+* Uses conservative multi-poll confirmation before in-place handover: 2 matching polls by default, or 3 when candidate churn/ambiguity is detected.
+* Requires exactly one enabled degraded watched row and exactly one reachable replacement candidate for a handover to proceed.
+* Requires replacement-candidate age of at least one poll window before mutation, reducing same-pass flapping decisions.
+* Runs post-handover validation for 3 polls; if validation fails, automatic mutation is suspended for safety.
+* Suspended per-extension mutation is released only after 3 stable healthy polls.
+* Detects widespread topology churn and delays/suspends automatic mutation during bulk events until stability returns.
+* Manual **Reset from Asterisk** clears extension candidate/suspension state before rebuild.
+
 #### Reset from Asterisk maintenance action
 
 * Adds a per-extension **Reset from Asterisk** action beside Active Alerting in Watched Extensions.
