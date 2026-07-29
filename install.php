@@ -160,6 +160,121 @@ foreach ($defaultSettings as $key => $value) {
 	]);
 }
 
+// One-time migration: move legacy row-level enabled state to explicit
+// extension-level monitoring setting keys.
+$migrationMarkerKey = 'extension_monitoring_state_migrated_v1';
+
+$rwFetchAssocRow = static function ($result) {
+	if (!$result || !is_object($result)) {
+		return null;
+	}
+
+	if (method_exists($result, 'fetchRow')) {
+		if (defined('DB_FETCHMODE_ASSOC')) {
+			$row = $result->fetchRow(DB_FETCHMODE_ASSOC);
+		} else {
+			$row = $result->fetchRow();
+		}
+		if ($row === false || $row === null) {
+			return null;
+		}
+		if (is_array($row)) {
+			return $row;
+		}
+		return null;
+	}
+
+	if (method_exists($result, 'fetch')) {
+		$row = $result->fetch();
+		if ($row === false || $row === null) {
+			return null;
+		}
+		if (is_array($row)) {
+			return $row;
+		}
+		return null;
+	}
+
+	return null;
+};
+
+$rwFetchFirstValue = static function ($result) use ($rwFetchAssocRow) {
+	$row = $rwFetchAssocRow($result);
+	if (!is_array($row) || !$row) {
+		return false;
+	}
+
+	foreach ($row as $value) {
+		return $value;
+	}
+
+	return false;
+};
+
+$markerResult = $db->query("SELECT setting_value FROM registrationwatch_settings WHERE setting_key = '" . addslashes($migrationMarkerKey) . "' LIMIT 1");
+$markerExists = $rwFetchFirstValue($markerResult);
+
+if ($markerExists === false) {
+	$rowsStmt = $db->query(
+		"SELECT extension,
+			COUNT(*) AS total_rows,
+			SUM(CASE WHEN enabled = 1 THEN 1 ELSE 0 END) AS enabled_rows
+		FROM registrationwatch_registrations
+		GROUP BY extension"
+	);
+	$rows = [];
+	if ($rowsStmt) {
+		while (true) {
+			$row = $rwFetchAssocRow($rowsStmt);
+			if (!is_array($row)) {
+				break;
+			}
+			$rows[] = $row;
+		}
+	}
+	$upsertMonitoring = $db->prepare(
+		'INSERT IGNORE INTO registrationwatch_settings (setting_key, setting_value, updated_at)
+		VALUES (:setting_key, :setting_value, :updated_at)'
+	);
+	$now = date('Y-m-d H:i:s');
+
+	foreach ($rows as $row) {
+		$extension = strtolower(trim((string)($row['extension'] ?? '')));
+		if ($extension === '') {
+			continue;
+		}
+
+		$totalRows = isset($row['total_rows']) ? (int)$row['total_rows'] : 0;
+		$enabledRows = isset($row['enabled_rows']) ? (int)$row['enabled_rows'] : 0;
+		if ($totalRows <= 0) {
+			continue;
+		}
+
+		if ($enabledRows === 0) {
+			$settingValue = '0';
+		} elseif ($enabledRows === $totalRows) {
+			$settingValue = '1';
+		} else {
+			// Mixed legacy rows cannot represent one extension-level value reliably.
+			// Preserve prior monitored behavior conservatively.
+			$settingValue = '1';
+		}
+
+		$upsertMonitoring->execute([
+			':setting_key' => 'extension_monitoring_state_' . $extension,
+			':setting_value' => $settingValue,
+			':updated_at' => $now,
+		]);
+	}
+
+	$markerInsert = $db->prepare('INSERT IGNORE INTO registrationwatch_settings (setting_key, setting_value, updated_at) VALUES (:setting_key, :setting_value, :updated_at)');
+	$markerInsert->execute([
+		':setting_key' => $migrationMarkerKey,
+		':setting_value' => '1',
+		':updated_at' => $now,
+	]);
+}
+
 // Register Registration Watch background job.
 // FreePBX runs centralized jobs once per minute via fwconsole job --run.
 try {

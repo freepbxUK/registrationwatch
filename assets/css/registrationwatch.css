@@ -262,6 +262,21 @@ body:has(.registrationwatch) #page_body {
 	min-height: 150px;
 }
 
+.registrationwatch .rw-map-tile-ok {
+	background: #dff0d8;
+	border-color: #c9e2b3;
+}
+
+.registrationwatch .rw-map-tile-bad {
+	background: #f2dede;
+	border-color: #ebcccc;
+}
+
+.registrationwatch .rw-map-tile-neutral {
+	background: #fff;
+	border-color: #ddd;
+}
+
 .registrationwatch .rw-map-title {
 	display: flex;
 	align-items: center;
@@ -336,6 +351,18 @@ body:has(.registrationwatch) #page_body {
 	font-size: 12px;
 	vertical-align: middle !important;
 	white-space: nowrap;
+}
+
+.registrationwatch .rw-map-row-view > tbody > tr.rw-map-row-ok > td {
+	background-color: #dff0d8 !important;
+}
+
+.registrationwatch .rw-map-row-view > tbody > tr.rw-map-row-bad > td {
+	background-color: #f2dede !important;
+}
+
+.registrationwatch .rw-map-row-view > tbody > tr.rw-map-row-neutral > td {
+	background-color: #fff !important;
 }
 
 .registrationwatch .rw-map-row-view td:nth-child(3) {
@@ -453,6 +480,13 @@ body:has(.registrationwatch) #page_body {
         gap: 3px;
 }
 
+.registrationwatch .rw-alerting-actions {
+	display: flex;
+	flex-wrap: nowrap;
+	gap: 6px;
+	align-items: center;
+}
+
 .registrationwatch .rw-alerting-indicator {
         margin-left: 8px;
         color: #c9302c;
@@ -467,6 +501,12 @@ body:has(.registrationwatch) #page_body {
         background-color: #c9302c !important;
         border-color: #ac2925 !important;
         color: #fff !important;
+}
+
+.registrationwatch .rw-reset-from-asterisk {
+	line-height: 1.2;
+	padding: 2px 8px;
+	font-size: 11px;
 }
 
 .registrationwatch .rw-global-snoozed-label {

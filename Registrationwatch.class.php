@@ -13,7 +13,7 @@ namespace FreePBX\modules;
 class Registrationwatch implements \BMO {
 
 	/** Fallback only. Authoritative version lives in module.xml. */
-	const VERSION = '1.3.0';
+	const VERSION = '1.3.1';
 
 	const STATUS_REACHABLE = 'Reachable';
 	const STATUS_UNREACHABLE = 'Unreachable';
@@ -40,6 +40,13 @@ class Registrationwatch implements \BMO {
 		self::REPEAT_MODE_DAILY,
 		self::REPEAT_MODE_ESCALATING,
 	];
+	const AUTO_HANDOVER_STATE_PREFIX = 'auto_handover_state_';
+	const AUTO_HANDOVER_BULK_STATE_KEY = 'auto_handover_bulk_state';
+	const EXTENSION_MONITORING_SETTING_PREFIX = 'extension_monitoring_state_';
+	const AUTO_HANDOVER_CONFIRM_POLLS_DEFAULT = 2;
+	const AUTO_HANDOVER_CONFIRM_POLLS_CHURN = 3;
+	const AUTO_HANDOVER_VALIDATION_POLLS = 3;
+	const AUTO_HANDOVER_SUSPEND_RELEASE_POLLS = 3;
 
 	private $settingsDefaults = [
 		'alert_enabled' => '0',
@@ -271,6 +278,7 @@ class Registrationwatch implements \BMO {
 			case 'saveprunepolicy':
 			case 'deletestatushistoryrow':
 			case 'deletealerthistoryrow':
+			case 'resetextensionfromasterisk':
 			case 'snoozemonitoring':
 			case 'resumemonitoring':
 				return true;
@@ -317,6 +325,8 @@ class Registrationwatch implements \BMO {
 				return $this->handleDeleteStatusHistoryRow();
 			case 'deletealerthistoryrow':
 				return $this->handleDeleteAlertHistoryRow();
+			case 'resetextensionfromasterisk':
+				return $this->handleResetExtensionFromAsterisk();
 			case 'snoozemonitoring':
 				return $this->handleSnoozeMonitoring();
 			case 'resumemonitoring':
@@ -365,6 +375,8 @@ class Registrationwatch implements \BMO {
 			return ['status' => false, 'message' => _('Missing watched registration.')];
 		}
 
+		$this->setExtensionConfiguredMonitoringState($extension, $enabled);
+
 		$stmt = $db->prepare('UPDATE registrationwatch_registrations SET enabled = :enabled, updated_at = :updated_at WHERE extension = :extension');
 		$stmt->execute([
 			':enabled' => $enabled,
@@ -378,6 +390,262 @@ class Registrationwatch implements \BMO {
 			'registration_id' => $registrationId,
 			'enabled' => $enabled,
 			'monitoringState' => $this->getMonitoringState(),
+		];
+	}
+
+	private function extensionMonitoringSettingKey(string $extension): string {
+		return self::EXTENSION_MONITORING_SETTING_PREFIX . $this->normaliseRegistrationExtension($extension);
+	}
+
+	private function setExtensionConfiguredMonitoringState(string $extension, int $enabled): void {
+		$normalised = $this->normaliseRegistrationExtension($extension);
+		if ($normalised === '') {
+			return;
+		}
+		$this->setSetting($this->extensionMonitoringSettingKey($normalised), $enabled ? '1' : '0');
+	}
+
+	private function getExtensionConfiguredMonitoringState(string $extension): ?int {
+		$normalised = $this->normaliseRegistrationExtension($extension);
+		if ($normalised === '') {
+			return null;
+		}
+
+		$stmt = $this->db()->prepare('SELECT setting_value FROM registrationwatch_settings WHERE setting_key = :setting_key LIMIT 1');
+		$stmt->execute([':setting_key' => $this->extensionMonitoringSettingKey($normalised)]);
+		$value = $stmt->fetchColumn();
+		if ($value !== false && $value !== null && trim((string)$value) !== '') {
+			return trim((string)$value) === '1' ? 1 : 0;
+		}
+
+		return null;
+	}
+
+	private function handleResetExtensionFromAsterisk(): array {
+		$registrationId = $this->positiveRequestId('registration_id');
+		if ($registrationId <= 0) {
+			return ['status' => false, 'message' => _('Missing watched registration.')];
+		}
+
+		$db = $this->db();
+		$extStmt = $db->prepare('SELECT extension FROM registrationwatch_registrations WHERE id = :id');
+		$extStmt->execute([':id' => $registrationId]);
+		$extension = $this->normaliseRegistrationExtension((string)($extStmt->fetchColumn() ?? ''));
+		if ($extension === '') {
+			return ['status' => false, 'message' => _('Missing watched registration.')];
+		}
+
+		$this->clearAutoHandoverState($extension, 'manual_refresh_from_asterisk');
+
+		if (!$this->acquireReconcileLock()) {
+			return ['status' => false, 'message' => _('Reset is unavailable because another registration reconcile is running. Try again in a moment.')];
+		}
+
+		try {
+			$settings = $this->extensionResetSnapshot($extension);
+			if (!$settings['ok']) {
+				return ['status' => false, 'message' => $settings['message']];
+			}
+
+			$allowedDevices = $this->getAllowedPjsipDeviceIds();
+			if (!isset($allowedDevices[$extension])) {
+				return ['status' => false, 'message' => _('This extension is no longer a configured PJSIP device, so it cannot be rebuilt from Asterisk contacts.')];
+			}
+
+			$db->beginTransaction();
+			try {
+				$now = $this->now();
+				$liveContacts = $this->getLiveContacts($allowedDevices);
+				$descriptions = $this->getRegistrationDescriptions();
+				$description = $descriptions[$extension] ?? '';
+
+				$clearEscalations = $db->prepare(
+					'DELETE FROM registrationwatch_alert_escalation
+					WHERE registration_id IN (
+						SELECT id FROM registrationwatch_registrations WHERE extension = :extension
+					)'
+				);
+				$clearEscalations->execute([':extension' => $extension]);
+
+				$deleteRows = $db->prepare('DELETE FROM registrationwatch_registrations WHERE extension = :extension');
+				$deleteRows->execute([':extension' => $extension]);
+
+				$extensionContacts = [];
+				foreach ($liveContacts as $contact) {
+					if ($this->normaliseRegistrationExtension((string)($contact['extension'] ?? '')) !== $extension) {
+						continue;
+					}
+					$extensionContacts[] = $contact;
+				}
+
+				if ($extensionContacts) {
+					$insert = $db->prepare(
+						'INSERT INTO registrationwatch_registrations
+							(registration_key, extension, description, notes, notes_updated_at, enabled, auto_disabled_absent_at, repeat_mode,
+								discovered, last_known_status, contact_uri, source_ip, source_port, registration_ua_class,
+								transport, user_agent, device_name, firmware_version, contact_count,
+								contact_expires_at, qualify_frequency, latency_ms, last_seen_at, last_checked_at,
+								created_at, updated_at, first_discovered_at, last_discovered_at)
+						VALUES
+							(:registration_key, :extension, :description, :notes, :notes_updated_at, :enabled, NULL, :repeat_mode,
+								1, :last_known_status, :contact_uri, :source_ip, :source_port, :registration_ua_class,
+								:transport, :user_agent, :device_name, :firmware_version, :contact_count,
+								:contact_expires_at, :qualify_frequency, :latency_ms, :last_seen_at, :last_checked_at,
+								:created_at, :updated_at, :first_discovered_at, :last_discovered_at)'
+					);
+
+					foreach ($extensionContacts as $contact) {
+						$contactUri = (string)($contact['contact_uri'] ?? '');
+						$lastSeenAt = $contactUri !== '' ? $now : null;
+						$insert->execute([
+							':registration_key' => (string)$contact['registration_key'],
+							':extension' => $extension,
+							':description' => $description,
+							':notes' => $settings['notes'],
+							':notes_updated_at' => $settings['notes_updated_at'],
+							':enabled' => $settings['enabled'],
+							':repeat_mode' => $settings['repeat_mode'],
+							':last_known_status' => $this->normaliseState($contact['status'] ?? self::STATUS_UNKNOWN),
+							':contact_uri' => $contactUri !== '' ? $contactUri : null,
+							':source_ip' => $contact['source_ip'] ?? null,
+							':source_port' => $contact['source_port'] ?? null,
+							':registration_ua_class' => $contact['registration_ua_class'] ?? '',
+							':transport' => $contact['transport'] ?? null,
+							':user_agent' => $contact['user_agent'] ?? null,
+							':device_name' => $contact['device_name'] ?? null,
+							':firmware_version' => $contact['firmware_version'] ?? null,
+							':contact_count' => max(1, (int)($contact['contact_count'] ?? 1)),
+							':contact_expires_at' => $contact['contact_expires_at'] ?? null,
+							':qualify_frequency' => $contact['qualify_frequency'] ?? null,
+							':latency_ms' => $contact['latency_ms'] ?? null,
+							':last_seen_at' => $lastSeenAt,
+							':last_checked_at' => $now,
+							':created_at' => $now,
+							':updated_at' => $now,
+							':first_discovered_at' => $now,
+							':last_discovered_at' => $now,
+						]);
+					}
+				} else {
+					$insert = $db->prepare(
+						'INSERT INTO registrationwatch_registrations
+							(registration_key, extension, description, notes, notes_updated_at, enabled, auto_disabled_absent_at, repeat_mode,
+								discovered, last_known_status, contact_count, last_checked_at,
+								created_at, updated_at, first_discovered_at, last_discovered_at)
+						VALUES
+							(:registration_key, :extension, :description, :notes, :notes_updated_at, :enabled, NULL, :repeat_mode,
+								1, :last_known_status, 1, :last_checked_at,
+								:created_at, :updated_at, :first_discovered_at, :last_discovered_at)'
+					);
+					$insert->execute([
+						':registration_key' => $this->noContactRegistrationKey($extension),
+						':extension' => $extension,
+						':description' => $description,
+						':notes' => $settings['notes'],
+						':notes_updated_at' => $settings['notes_updated_at'],
+						':enabled' => $settings['enabled'],
+						':repeat_mode' => $settings['repeat_mode'],
+						':last_known_status' => self::STATUS_NOT_REGISTERED,
+						':last_checked_at' => $now,
+						':created_at' => $now,
+						':updated_at' => $now,
+						':first_discovered_at' => $now,
+						':last_discovered_at' => $now,
+					]);
+				}
+
+				$db->commit();
+			} catch (\Throwable $e) {
+				if ($db->inTransaction()) {
+					$db->rollBack();
+				}
+				throw $e;
+			}
+
+			return [
+				'status' => true,
+				'message' => _('Registration state reset from Asterisk.'),
+				'registrations' => $this->getRegistrationMapRows(),
+				'watchedExtensions' => $this->getWatchedExtensionGroups(),
+				'statusHistory' => $this->getStatusHistory(),
+				'alertHistory' => $this->getAlertHistory(),
+				'timeDiagnostics' => $this->getTimeDiagnostics(),
+				'monitoringState' => $this->getMonitoringState(),
+			];
+		} catch (\Throwable $e) {
+			$this->logError('Extension reset from Asterisk failed: ' . $e->getMessage());
+			return ['status' => false, 'message' => _('Unable to reset from Asterisk. No changes were applied.')];
+		} finally {
+			$this->releaseReconcileLock();
+		}
+	}
+
+	private function extensionResetSnapshot(string $extension): array {
+		$stmt = $this->db()->prepare(
+			'SELECT id, notes, notes_updated_at, enabled, repeat_mode
+			FROM registrationwatch_registrations
+			WHERE extension = :extension
+			ORDER BY id ASC'
+		);
+		$stmt->execute([':extension' => $extension]);
+		$rows = $stmt->fetchAll(\PDO::FETCH_ASSOC);
+
+		if (!$rows) {
+			return [
+				'ok' => false,
+				'message' => _('No stored registrations were found for this extension.'),
+			];
+		}
+
+		$normalise = function ($value): string {
+			return trim((string)$value);
+		};
+
+		$noteValues = [];
+		$preservedRow = null;
+		foreach ($rows as $row) {
+			$note = $normalise($row['notes'] ?? '');
+			if ($note === '') {
+				continue;
+			}
+
+			$noteValues[$note] = true;
+			if ($preservedRow === null) {
+				$preservedRow = $row;
+			}
+		}
+
+		if (count($noteValues) > 1) {
+			return [
+				'ok' => false,
+				'message' => _('Refresh cancelled because this extension has conflicting notes. Make the notes match, then try again.'),
+			];
+		}
+
+		$enabledConfigured = $this->getExtensionConfiguredMonitoringState($extension);
+		$enabled = $enabledConfigured === null ? 0 : $enabledConfigured;
+		$repeatMode = null;
+		$preservedRow = $preservedRow ?? $rows[0];
+		$notes = $normalise($preservedRow['notes'] ?? '');
+		$notesUpdatedAt = $normalise($preservedRow['notes_updated_at'] ?? '') !== ''
+			? (string)$preservedRow['notes_updated_at']
+			: null;
+
+		foreach ($rows as $row) {
+			$currentRepeat = isset($row['repeat_mode']) && trim((string)$row['repeat_mode']) !== ''
+				? $this->normaliseRepeatMode((string)$row['repeat_mode'])
+				: null;
+			if ($currentRepeat !== null) {
+				$repeatMode = $currentRepeat;
+			}
+		}
+
+		return [
+			'ok' => true,
+			'enabled' => $enabled,
+			'repeat_mode' => $repeatMode,
+			'notes' => $notes,
+			'notes_updated_at' => $notesUpdatedAt,
 		];
 	}
 
@@ -854,6 +1122,15 @@ class Registrationwatch implements \BMO {
 		$now = $this->now();
 		$allowedDevices = $allowedDevices === null ? $this->getAllowedPjsipDeviceIds() : $allowedDevices;
 		$liveContacts = $liveContacts === null ? $this->getLiveContacts($allowedDevices) : $liveContacts;
+		$liveContactKeys = array_fill_keys(array_keys($liveContacts), true);
+		$liveKeysByExtension = [];
+		foreach ($liveContacts as $liveContact) {
+			$liveExtension = $this->normaliseRegistrationExtension((string)($liveContact['extension'] ?? ''));
+			if ($liveExtension === '') {
+				continue;
+			}
+			$liveKeysByExtension[$liveExtension][] = (string)($liveContact['registration_key'] ?? '');
+		}
 		$descriptions = $this->getRegistrationDescriptions();
 		$liveExtensions = [];
 		$db = $this->db();
@@ -952,7 +1229,13 @@ class Registrationwatch implements \BMO {
 				continue;
 			}
 
-			$deadRegistrationId = $this->singleDeadRegistrationId($extension);
+			$deadCandidateDiagnostics = $this->singleDeadCandidateDiagnostics($extension, (string)$registration['registration_key'], $liveKeysByExtension[$this->normaliseRegistrationExtension($extension)] ?? []);
+			$this->logSingleDeadCandidateDiagnostics($deadCandidateDiagnostics);
+
+			$deadRegistrationId = $this->singleDeadRegistrationId($extension, $liveContactKeys);
+			if ($deadRegistrationId <= 0) {
+				$this->logInfo('Registration Watch continuity reuse rejected: ' . ($deadCandidateDiagnostics['rejection_reason'] ?? 'unknown'));
+			}
 			if ($deadRegistrationId > 0) {
 				$update = $db->prepare(
 					'UPDATE registrationwatch_registrations
@@ -997,13 +1280,18 @@ class Registrationwatch implements \BMO {
 				continue;
 			}
 
+			$normalisedExtension = $this->normaliseRegistrationExtension($extension);
+			$configuredMonitoringState = $this->getExtensionConfiguredMonitoringState($normalisedExtension);
+			$inheritedEnabled = $configuredMonitoringState === null ? 0 : $configuredMonitoringState;
+			$this->logInfo('Registration Watch continuity fallback insert enabled=' . $inheritedEnabled . ' for extension ' . $normalisedExtension . ', registration_key ' . (string)$registration['registration_key']);
+
 			$insert = $db->prepare(
 				'INSERT INTO registrationwatch_registrations
 					(registration_key, extension, description, enabled, discovered, last_known_status, contact_uri,
 					 source_ip, source_port, registration_ua_class, transport, user_agent, device_name, firmware_version,
 					 contact_count, contact_expires_at, qualify_frequency, created_at, updated_at, first_discovered_at, last_discovered_at)
 				VALUES
-					(:registration_key, :extension, :description, 0, 1, :last_known_status, :contact_uri,
+					(:registration_key, :extension, :description, :enabled, 1, :last_known_status, :contact_uri,
 					 :source_ip, :source_port, :registration_ua_class, :transport, :user_agent, :device_name, :firmware_version,
 					 :contact_count, :contact_expires_at, :qualify_frequency, :created_at, :updated_at, :first_discovered_at, :last_discovered_at)'
 			);
@@ -1011,6 +1299,7 @@ class Registrationwatch implements \BMO {
 				':registration_key' => $registration['registration_key'],
 				':extension' => $extension,
 				':description' => $descriptions[$extension] ?? '',
+				':enabled' => $inheritedEnabled,
 				':last_known_status' => self::STATUS_UNKNOWN,
 				':contact_uri' => $registration['contact_uri'] ?? null,
 				':source_ip' => $registration['source_ip'] ?? null,
@@ -1039,19 +1328,22 @@ class Registrationwatch implements \BMO {
 			if (isset($liveExtensions[$extension]) || ($knownCounts[$extension] ?? 0) > 0) {
 				continue;
 			}
+			$configuredMonitoringState = $this->getExtensionConfiguredMonitoringState($extension);
+			$enabled = $configuredMonitoringState === null ? 0 : $configuredMonitoringState;
 
 			$stmt = $this->db()->prepare(
 				'INSERT IGNORE INTO registrationwatch_registrations
 					(registration_key, extension, description, enabled, discovered, last_known_status,
 					 contact_count, created_at, updated_at, first_discovered_at, last_discovered_at)
 				VALUES
-					(:registration_key, :extension, :description, 0, 1, :last_known_status,
+					(:registration_key, :extension, :description, :enabled, 1, :last_known_status,
 					 1, :created_at, :updated_at, :first_discovered_at, :last_discovered_at)'
 			);
 			$stmt->execute([
 				':registration_key' => $this->noContactRegistrationKey($extension),
 				':extension' => $extension,
 				':description' => $descriptions[$extension] ?? '',
+				':enabled' => $enabled,
 				':last_known_status' => self::STATUS_UNKNOWN,
 				':created_at' => $now,
 				':updated_at' => $now,
@@ -1072,6 +1364,47 @@ class Registrationwatch implements \BMO {
 		}
 
 		return $counts;
+	}
+
+	private function normaliseExtensionMonitoringState(array $allowedDevices, string $now): void {
+		$extensionsStmt = $this->db()->query('SELECT DISTINCT extension FROM registrationwatch_registrations');
+		$extensions = $extensionsStmt ? $extensionsStmt->fetchAll(\PDO::FETCH_COLUMN, 0) : [];
+		$updateEnabled = $this->db()->prepare(
+			'UPDATE registrationwatch_registrations
+			SET enabled = :enabled,
+				updated_at = :updated_at
+			WHERE extension = :extension
+				AND enabled <> :enabled'
+		);
+		$clearAutoDisabled = $this->db()->prepare(
+			'UPDATE registrationwatch_registrations
+			SET auto_disabled_absent_at = NULL,
+				updated_at = :updated_at
+			WHERE extension = :extension
+				AND auto_disabled_absent_at IS NOT NULL'
+		);
+
+		foreach ($extensions as $extension) {
+			$normalised = $this->normaliseRegistrationExtension((string)$extension);
+			if ($normalised === '' || !isset($allowedDevices[$normalised])) {
+				continue;
+			}
+			$configured = $this->getExtensionConfiguredMonitoringState($normalised);
+			if ($configured === null) {
+				continue;
+			}
+			$updateEnabled->execute([
+				':enabled' => $configured,
+				':updated_at' => $now,
+				':extension' => $normalised,
+			]);
+			if ($configured === 1) {
+				$clearAutoDisabled->execute([
+					':updated_at' => $now,
+					':extension' => $normalised,
+				]);
+			}
+		}
 	}
 
 	private function hasStoredRegistrations(): bool {
@@ -1101,22 +1434,173 @@ class Registrationwatch implements \BMO {
 		return $id ? (int)$id : 0;
 	}
 
-	private function singleDeadRegistrationId(string $extension): int {
-		$stmt = $this->db()->prepare(
+	private function singleDeadRegistrationId(string $extension, ?array $liveContactKeys = null): int {
+		$normalisedExtension = $this->normaliseRegistrationExtension($extension);
+		if ($normalisedExtension === '') {
+			return 0;
+		}
+
+		if ($liveContactKeys === null) {
+			$stmt = $this->db()->prepare(
+				'SELECT id
+				FROM registrationwatch_registrations
+				WHERE extension = :extension
+					AND last_known_status = :status
+				ORDER BY id ASC
+				LIMIT 2'
+			);
+			$stmt->execute([
+				':extension' => $normalisedExtension,
+				':status' => self::STATUS_NOT_REGISTERED,
+			]);
+			$ids = $stmt->fetchAll(\PDO::FETCH_COLUMN, 0);
+
+			return count($ids) === 1 ? (int)$ids[0] : 0;
+		}
+
+		$placeholderKey = $this->noContactRegistrationKey($normalisedExtension);
+		$params = [
+			':extension' => $normalisedExtension,
+			':placeholder_key' => $placeholderKey,
+		];
+		$sql =
 			'SELECT id
 			FROM registrationwatch_registrations
 			WHERE extension = :extension
-				AND last_known_status = :status
-			ORDER BY id ASC
-			LIMIT 2'
-		);
-		$stmt->execute([
-			':extension' => $this->normaliseRegistrationExtension($extension),
-			':status' => self::STATUS_NOT_REGISTERED,
-		]);
+				AND discovered = 1
+				AND source_ip IS NOT NULL AND source_ip <> ""
+				AND registration_key <> :placeholder_key';
+
+		if ($liveContactKeys) {
+			$placeholders = [];
+			$index = 0;
+			foreach (array_keys($liveContactKeys) as $liveKey) {
+				$key = ':live_key_' . $index;
+				$placeholders[] = $key;
+				$params[$key] = (string)$liveKey;
+				$index++;
+			}
+			$sql .= ' AND registration_key NOT IN (' . implode(', ', $placeholders) . ')';
+		}
+
+		$sql .= ' ORDER BY id ASC LIMIT 2';
+		$stmt = $this->db()->prepare($sql);
+		$stmt->execute($params);
 		$ids = $stmt->fetchAll(\PDO::FETCH_COLUMN, 0);
 
 		return count($ids) === 1 ? (int)$ids[0] : 0;
+	}
+
+	private function singleDeadCandidateDiagnostics(string $extension, string $newRegistrationKey, array $extensionLiveKeys): array {
+		$normalisedExtension = $this->normaliseRegistrationExtension($extension);
+		$placeholderKey = $this->noContactRegistrationKey($normalisedExtension);
+
+		$stmt = $this->db()->prepare(
+			'SELECT id, registration_key, source_ip, discovered, last_known_status, enabled
+			FROM registrationwatch_registrations
+			WHERE extension = :extension
+			ORDER BY id ASC'
+		);
+		$stmt->execute([':extension' => $normalisedExtension]);
+		$rows = $stmt->fetchAll(\PDO::FETCH_ASSOC);
+
+		$liveKeysSet = [];
+		foreach ($extensionLiveKeys as $liveKey) {
+			$liveKeysSet[(string)$liveKey] = true;
+		}
+
+		$candidateCount = 0;
+		$predicateMisses = [
+			'discovered' => 0,
+			'source_ip' => 0,
+			'placeholder' => 0,
+			'live_key_conflict' => 0,
+		];
+		$rowDiagnostics = [];
+
+		foreach ($rows as $row) {
+			$rowKey = (string)($row['registration_key'] ?? '');
+			$hasSourceIp = trim((string)($row['source_ip'] ?? '')) !== '';
+			$isDiscovered = (int)($row['discovered'] ?? 0) === 1;
+			$isPlaceholder = $rowKey === $placeholderKey;
+			$isLiveKey = isset($liveKeysSet[$rowKey]);
+
+			$predicate = [
+				'discovered' => $isDiscovered,
+				'has_source_ip' => $hasSourceIp,
+				'not_placeholder' => !$isPlaceholder,
+				'not_live_key' => !$isLiveKey,
+			];
+
+			$eligible = $predicate['discovered']
+				&& $predicate['has_source_ip']
+				&& $predicate['not_placeholder']
+				&& $predicate['not_live_key'];
+
+			if ($eligible) {
+				$candidateCount++;
+			} else {
+				if (!$predicate['discovered']) {
+					$predicateMisses['discovered']++;
+				}
+				if (!$predicate['has_source_ip']) {
+					$predicateMisses['source_ip']++;
+				}
+				if (!$predicate['not_placeholder']) {
+					$predicateMisses['placeholder']++;
+				}
+				if (!$predicate['not_live_key']) {
+					$predicateMisses['live_key_conflict']++;
+				}
+			}
+
+			$rowDiagnostics[] = [
+				'id' => (int)($row['id'] ?? 0),
+				'registration_key' => $rowKey,
+				'source_ip' => $row['source_ip'] ?? null,
+				'discovered' => (int)($row['discovered'] ?? 0),
+				'is_placeholder' => $isPlaceholder,
+				'last_known_status' => (string)($row['last_known_status'] ?? ''),
+				'enabled' => (int)($row['enabled'] ?? 0),
+				'predicates' => $predicate,
+				'eligible' => $eligible,
+			];
+		}
+
+		$rejectionReason = 'single dead candidate found';
+		if ($candidateCount === 0) {
+			$reasons = [];
+			if ($predicateMisses['discovered'] > 0) {
+				$reasons[] = 'rows not discovered=' . $predicateMisses['discovered'];
+			}
+			if ($predicateMisses['source_ip'] > 0) {
+				$reasons[] = 'rows missing source_ip=' . $predicateMisses['source_ip'];
+			}
+			if ($predicateMisses['placeholder'] > 0) {
+				$reasons[] = 'placeholder rows=' . $predicateMisses['placeholder'];
+			}
+			if ($predicateMisses['live_key_conflict'] > 0) {
+				$reasons[] = 'rows still live in current keyset=' . $predicateMisses['live_key_conflict'];
+			}
+			$rejectionReason = 'no dead candidates; ' . ($reasons ? implode(', ', $reasons) : 'no rows matched predicate set');
+		} elseif ($candidateCount > 1) {
+			$rejectionReason = 'ambiguous dead candidates count=' . $candidateCount;
+		}
+
+		return [
+			'extension' => $normalisedExtension,
+			'new_registration_key' => $newRegistrationKey,
+			'live_keys_for_extension' => array_values(array_unique(array_filter(array_map('strval', $extensionLiveKeys), function ($key) {
+				return $key !== '';
+			}))),
+			'rows' => $rowDiagnostics,
+			'candidate_count' => $candidateCount,
+			'rejection_reason' => $rejectionReason,
+		];
+	}
+
+	private function logSingleDeadCandidateDiagnostics(array $diagnostics): void {
+		$this->logInfo('Registration Watch continuity candidate diagnostics: ' . json_encode($diagnostics));
 	}
 
 	private function getPjsipRegistrationTargets(): array {
@@ -1224,6 +1708,8 @@ class Registrationwatch implements \BMO {
 		$contacts = $this->getLiveContacts($allowedDevices);
 		$this->syncDiscoveredRegistrations($contacts, $allowedDevices);
 		$now = $this->now();
+		$this->normaliseExtensionMonitoringState($allowedDevices, $now);
+		$this->applyAutomaticIpChangeHandover($contacts, $allowedDevices, $now);
 		$db = $this->db();
 		$registrations = $this->getStoredRegistrations();
 		$settings = $this->getAlertSettings();
@@ -1350,7 +1836,547 @@ class Registrationwatch implements \BMO {
 			]);
 		}
 
+		$this->normaliseExtensionMonitoringState($allowedDevices, $now);
+
 		$this->processAlertQueue($now);
+	}
+
+	private function autoHandoverStateKey(string $extension): string {
+		return self::AUTO_HANDOVER_STATE_PREFIX . $this->normaliseRegistrationExtension($extension);
+	}
+
+	private function getJsonSettingState(string $key): array {
+		$stmt = $this->db()->prepare('SELECT setting_value FROM registrationwatch_settings WHERE setting_key = :setting_key LIMIT 1');
+		$stmt->execute([':setting_key' => $key]);
+		$raw = (string)($stmt->fetchColumn() ?? '');
+		if ($raw === '') {
+			return [];
+		}
+		$decoded = json_decode($raw, true);
+		return is_array($decoded) ? $decoded : [];
+	}
+
+	private function setJsonSettingState(string $key, array $state): void {
+		$encoded = json_encode($state);
+		if ($encoded === false) {
+			return;
+		}
+		$this->setSetting($key, $encoded);
+	}
+
+	private function clearJsonSettingState(string $key): void {
+		$stmt = $this->db()->prepare('DELETE FROM registrationwatch_settings WHERE setting_key = :setting_key');
+		$stmt->execute([':setting_key' => $key]);
+	}
+
+	private function getAutoHandoverState(string $extension): array {
+		return $this->getJsonSettingState($this->autoHandoverStateKey($extension));
+	}
+
+	private function setAutoHandoverState(string $extension, array $state): void {
+		$this->setJsonSettingState($this->autoHandoverStateKey($extension), $state);
+	}
+
+	private function clearAutoHandoverState(string $extension, string $reason = ''): void {
+		$this->clearJsonSettingState($this->autoHandoverStateKey($extension));
+		if ($reason !== '') {
+			$this->logInfo('Registration Watch auto handover candidate reset for extension ' . $extension . ': ' . $reason);
+		}
+	}
+
+	private function buildLiveSignature(array $contactsForExtension): string {
+		$parts = [];
+		foreach ($contactsForExtension as $registrationKey => $contact) {
+			$parts[] = implode('|', [
+				(string)$registrationKey,
+				$this->normaliseState($contact['status'] ?? self::STATUS_UNKNOWN),
+				$this->normaliseSourceIp($contact['source_ip'] ?? ''),
+				isset($contact['source_port']) ? (string)$contact['source_port'] : '',
+			]);
+		}
+		sort($parts, SORT_STRING);
+		return implode(',', $parts);
+	}
+
+	private function reachableReplacementContacts(array $contactsForExtension, string $oldKey, string $oldIp): array {
+		$reachable = [];
+		foreach ($contactsForExtension as $newKey => $contact) {
+			$newStatus = $this->normaliseState($contact['status'] ?? self::STATUS_UNKNOWN);
+			if ($newStatus !== self::STATUS_REACHABLE) {
+				continue;
+			}
+			$newIp = $this->normaliseSourceIp($contact['source_ip'] ?? '');
+			$isDifferentIdentity = ((string)$newKey !== $oldKey) || ($newIp !== '' && $newIp !== $oldIp);
+			if (!$isDifferentIdentity) {
+				continue;
+			}
+			$reachable[(string)$newKey] = $contact;
+		}
+		return $reachable;
+	}
+
+	private function applyAutomaticIpChangeHandover(array $contacts, array $allowedDevices, string $now): void {
+		$rowsByExtension = [];
+		$enabledMonitoredExtensions = [];
+		foreach ($this->getStoredRegistrations() as $row) {
+			if ((int)($row['discovered'] ?? 0) !== 1) {
+				continue;
+			}
+			$extension = $this->normaliseRegistrationExtension((string)($row['extension'] ?? ''));
+			if ($extension === '' || !isset($allowedDevices[$extension])) {
+				continue;
+			}
+			$rowsByExtension[$extension][] = $row;
+			if ((int)($row['enabled'] ?? 0) === 1) {
+				$enabledMonitoredExtensions[$extension] = true;
+			}
+		}
+
+		$liveByExtension = [];
+		$liveKeys = [];
+		foreach ($contacts as $registrationKey => $contact) {
+			$extension = $this->normaliseRegistrationExtension((string)($contact['extension'] ?? ''));
+			if ($extension === '' || !isset($allowedDevices[$extension])) {
+				continue;
+			}
+			$key = (string)$registrationKey;
+			$liveByExtension[$extension][$key] = $contact;
+			$liveKeys[$key] = true;
+		}
+
+		$globalSignature = $this->buildLiveSignature($contacts);
+		$bulkCandidateExtensions = 0;
+		foreach (array_keys(array_merge($rowsByExtension, $liveByExtension)) as $extension) {
+			$rows = $rowsByExtension[$extension] ?? [];
+			$live = $liveByExtension[$extension] ?? [];
+			$degradedCount = 0;
+			$replacementReachableCount = 0;
+			foreach ($rows as $row) {
+				if ((int)($row['enabled'] ?? 0) !== 1) {
+					continue;
+				}
+				$status = $this->normaliseState($row['last_known_status'] ?? self::STATUS_UNKNOWN);
+				if ($status === self::STATUS_UNREACHABLE || $status === self::STATUS_NOT_REGISTERED) {
+					$degradedCount++;
+				}
+			}
+			if ($degradedCount === 0) {
+				continue;
+			}
+			foreach ($live as $contact) {
+				if ($this->normaliseState($contact['status'] ?? self::STATUS_UNKNOWN) === self::STATUS_REACHABLE) {
+					$replacementReachableCount++;
+				}
+			}
+			if ($replacementReachableCount > 0) {
+				$bulkCandidateExtensions++;
+			}
+		}
+
+		$enabledExtensionCount = max(1, count($enabledMonitoredExtensions));
+		$bulkAbsoluteThreshold = 3;
+		$bulkProportion = $bulkCandidateExtensions / $enabledExtensionCount;
+		$isBulkEvent = $bulkCandidateExtensions >= $bulkAbsoluteThreshold && $bulkProportion >= 0.25;
+
+		$bulkState = $this->getJsonSettingState(self::AUTO_HANDOVER_BULK_STATE_KEY);
+		if (($bulkState['phase'] ?? '') === 'suspended') {
+			$stable = (($bulkState['global_signature'] ?? '') === $globalSignature && !$isBulkEvent)
+				? ((int)($bulkState['stable_healthy_polls'] ?? 0) + 1)
+				: 0;
+			$bulkState['stable_healthy_polls'] = $stable;
+			$bulkState['global_signature'] = $globalSignature;
+			$bulkState['updated_at'] = $now;
+			$this->setJsonSettingState(self::AUTO_HANDOVER_BULK_STATE_KEY, $bulkState);
+			if ($stable >= self::AUTO_HANDOVER_SUSPEND_RELEASE_POLLS) {
+				$this->clearJsonSettingState(self::AUTO_HANDOVER_BULK_STATE_KEY);
+				$this->logInfo('Registration Watch auto handover bulk suspension released after stable healthy polls.');
+			} else {
+				return;
+			}
+		} elseif ($isBulkEvent) {
+			if (!$bulkState || ($bulkState['phase'] ?? '') !== 'active') {
+				$bulkState = [
+					'phase' => 'active',
+					'first_seen_at' => $now,
+					'updated_at' => $now,
+					'global_signature' => $globalSignature,
+					'stable_polls' => 1,
+					'churn_events' => 0,
+					'candidate_extensions' => $bulkCandidateExtensions,
+				];
+				$this->setJsonSettingState(self::AUTO_HANDOVER_BULK_STATE_KEY, $bulkState);
+				$this->logWarning('Registration Watch bulk topology event detected; automatic handover delayed. candidate_extensions=' . $bulkCandidateExtensions . ', monitored_extensions=' . $enabledExtensionCount);
+				return;
+			}
+
+			if (($bulkState['global_signature'] ?? '') === $globalSignature) {
+				$bulkState['stable_polls'] = (int)($bulkState['stable_polls'] ?? 0) + 1;
+			} else {
+				$bulkState['churn_events'] = (int)($bulkState['churn_events'] ?? 0) + 1;
+				$bulkState['stable_polls'] = 1;
+				$bulkState['global_signature'] = $globalSignature;
+			}
+			$bulkState['candidate_extensions'] = $bulkCandidateExtensions;
+			$bulkState['updated_at'] = $now;
+			if ((int)($bulkState['churn_events'] ?? 0) >= 2) {
+				$bulkState['phase'] = 'suspended';
+				$bulkState['suspend_reason'] = 'bulk_event_flapping';
+				$bulkState['stable_healthy_polls'] = 0;
+				$this->setJsonSettingState(self::AUTO_HANDOVER_BULK_STATE_KEY, $bulkState);
+				$this->logWarning('Registration Watch bulk topology event continues changing; automatic handover bulk-suspended.');
+				return;
+			}
+			$this->setJsonSettingState(self::AUTO_HANDOVER_BULK_STATE_KEY, $bulkState);
+			return;
+		} elseif ($bulkState && ($bulkState['phase'] ?? '') === 'active') {
+			if (($bulkState['global_signature'] ?? '') === $globalSignature) {
+				$bulkState['stable_polls'] = (int)($bulkState['stable_polls'] ?? 0) + 1;
+			} else {
+				$bulkState['stable_polls'] = 0;
+				$bulkState['global_signature'] = $globalSignature;
+			}
+			$bulkState['updated_at'] = $now;
+			if ((int)($bulkState['stable_polls'] ?? 0) < 2) {
+				$this->setJsonSettingState(self::AUTO_HANDOVER_BULK_STATE_KEY, $bulkState);
+				return;
+			}
+			$this->clearJsonSettingState(self::AUTO_HANDOVER_BULK_STATE_KEY);
+			$this->logInfo('Registration Watch bulk topology event stabilized; automatic handover resumed.');
+		}
+
+		$extensions = array_unique(array_merge(array_keys($rowsByExtension), array_keys($liveByExtension)));
+		$pollWindowSeconds = max(5, $this->getPollInterval());
+		$nowTs = strtotime($now);
+		if ($nowTs === false) {
+			return;
+		}
+
+		foreach ($extensions as $extension) {
+			$state = $this->getAutoHandoverState($extension);
+			$phase = (string)($state['phase'] ?? '');
+			$rows = $rowsByExtension[$extension] ?? [];
+			$liveForExtension = $liveByExtension[$extension] ?? [];
+			$liveSignature = $this->buildLiveSignature($liveForExtension);
+
+			if ($phase === 'suspended') {
+				$reachableCount = 0;
+				foreach ($liveForExtension as $contact) {
+					if ($this->normaliseState($contact['status'] ?? self::STATUS_UNKNOWN) === self::STATUS_REACHABLE) {
+						$reachableCount++;
+					}
+				}
+				$enabledDegradedCount = 0;
+				foreach ($rows as $row) {
+					if ((int)($row['enabled'] ?? 0) !== 1) {
+						continue;
+					}
+					$status = $this->normaliseState($row['last_known_status'] ?? self::STATUS_UNKNOWN);
+					if ($status === self::STATUS_UNREACHABLE || $status === self::STATUS_NOT_REGISTERED) {
+						$enabledDegradedCount++;
+					}
+				}
+				$healthy = $enabledDegradedCount === 0 && $reachableCount === 1;
+				if ($healthy && ($state['healthy_signature'] ?? '') === $liveSignature) {
+					$state['healthy_polls'] = (int)($state['healthy_polls'] ?? 0) + 1;
+				} elseif ($healthy) {
+					$state['healthy_signature'] = $liveSignature;
+					$state['healthy_polls'] = 1;
+				} else {
+					$state['healthy_polls'] = 0;
+					$state['healthy_signature'] = $liveSignature;
+				}
+				$state['updated_at'] = $now;
+				$this->setAutoHandoverState($extension, $state);
+				if ((int)($state['healthy_polls'] ?? 0) >= self::AUTO_HANDOVER_SUSPEND_RELEASE_POLLS) {
+					$this->clearAutoHandoverState($extension, 'suspension_released_after_stable_healthy_polls');
+				}
+				continue;
+			}
+
+			if ($phase === 'validation') {
+				$expectedNewKey = (string)($state['new_key'] ?? '');
+				$expectedOldKey = (string)($state['old_key'] ?? '');
+				$reachable = [];
+				foreach ($liveForExtension as $key => $contact) {
+					if ($this->normaliseState($contact['status'] ?? self::STATUS_UNKNOWN) === self::STATUS_REACHABLE) {
+						$reachable[(string)$key] = $contact;
+					}
+				}
+				$valid = count($reachable) === 1
+					&& isset($reachable[$expectedNewKey])
+					&& ($expectedOldKey === '' || !isset($liveKeys[$expectedOldKey]));
+				if (!$valid) {
+					$state['phase'] = 'suspended';
+					$state['suspended_reason'] = 'post_handover_validation_failed';
+					$state['healthy_polls'] = 0;
+					$state['updated_at'] = $now;
+					$this->setAutoHandoverState($extension, $state);
+					$this->logWarning('Registration Watch auto handover post-handover validation failed for extension ' . $extension . '; automatic mutation suspended.');
+					continue;
+				}
+
+				$state['validation_observations'] = (int)($state['validation_observations'] ?? 0) + 1;
+				$this->logInfo('Registration Watch auto handover post-handover validation passed for extension ' . $extension . ': observation ' . $state['validation_observations'] . '/' . self::AUTO_HANDOVER_VALIDATION_POLLS);
+				if ((int)$state['validation_observations'] >= self::AUTO_HANDOVER_VALIDATION_POLLS) {
+					$this->clearAutoHandoverState($extension);
+				} else {
+					$state['updated_at'] = $now;
+					$this->setAutoHandoverState($extension, $state);
+				}
+				continue;
+			}
+
+			$enabledDegraded = array_values(array_filter($rows, function ($row) {
+				if ((int)($row['enabled'] ?? 0) !== 1) {
+					return false;
+				}
+				$status = $this->normaliseState($row['last_known_status'] ?? self::STATUS_UNKNOWN);
+				return $status === self::STATUS_UNREACHABLE || $status === self::STATUS_NOT_REGISTERED;
+			}));
+			if (count($enabledDegraded) !== 1) {
+				if ($state) {
+					$this->clearAutoHandoverState($extension, 'enabled_degraded_row_count=' . count($enabledDegraded));
+				}
+				continue;
+			}
+
+			$oldRow = $enabledDegraded[0];
+			$oldId = (int)$oldRow['id'];
+			$oldKey = (string)($oldRow['registration_key'] ?? '');
+			$oldIp = $this->normaliseSourceIp($oldRow['source_ip'] ?? '');
+			$oldStatus = $this->normaliseState($oldRow['last_known_status'] ?? self::STATUS_UNKNOWN);
+
+			$reachableReplacements = $this->reachableReplacementContacts($liveForExtension, $oldKey, $oldIp);
+			if (count($reachableReplacements) !== 1) {
+				if ($state) {
+					$reason = count($reachableReplacements) > 1 ? 'multiple_reachable_replacements' : 'replacement_missing';
+					$this->clearAutoHandoverState($extension, $reason);
+				}
+				continue;
+			}
+
+			$newKey = (string)array_key_first($reachableReplacements);
+			$replacement = $reachableReplacements[$newKey];
+			$newIp = $this->normaliseSourceIp($replacement['source_ip'] ?? '');
+
+			$duplicateRows = array_values(array_filter($rows, function ($row) use ($oldId, $newKey) {
+				return (int)($row['id'] ?? 0) !== $oldId
+					&& (string)($row['registration_key'] ?? '') === $newKey;
+			}));
+			if (count($duplicateRows) !== 1) {
+				if ($state) {
+					$this->clearAutoHandoverState($extension, 'duplicate_row_count=' . count($duplicateRows));
+				}
+				continue;
+			}
+
+			$duplicateRow = $duplicateRows[0];
+			$firstDiscoveredTs = strtotime((string)($duplicateRow['first_discovered_at'] ?? ''));
+			if ($firstDiscoveredTs === false || ($nowTs - $firstDiscoveredTs) < $pollWindowSeconds) {
+				continue;
+			}
+
+			$candidateTuple = [
+				'old_id' => $oldId,
+				'old_key' => $oldKey,
+				'new_key' => $newKey,
+				'old_ip' => $oldIp,
+				'new_ip' => $newIp,
+			];
+
+			if ($oldKey !== '' && isset($liveKeys[$oldKey])) {
+				if (!$state
+					|| ($state['phase'] ?? '') !== 'pre_candidate'
+					|| (int)($state['old_id'] ?? 0) !== $oldId
+					|| (string)($state['old_key'] ?? '') !== $oldKey
+					|| (string)($state['new_key'] ?? '') !== $newKey
+					|| (string)($state['old_ip'] ?? '') !== $oldIp
+					|| (string)($state['new_ip'] ?? '') !== $newIp
+				) {
+					$state = array_merge($candidateTuple, [
+						'phase' => 'pre_candidate',
+						'pre_observations' => 1,
+						'churn_events' => max(1, (int)($state['churn_events'] ?? 0)),
+						'confirmations' => 0,
+						'live_signature' => $liveSignature,
+						'first_seen_at' => $now,
+						'updated_at' => $now,
+					]);
+					$this->setAutoHandoverState($extension, $state);
+					$this->logInfo('Registration Watch auto handover candidate first seen for extension ' . $extension . ': old_key=' . $oldKey . ', new_key=' . $newKey . ', old_ip=' . ($oldIp !== '' ? $oldIp : '-') . ', new_ip=' . ($newIp !== '' ? $newIp : '-'));
+				} else {
+					$state['pre_observations'] = (int)($state['pre_observations'] ?? 0) + 1;
+					$state['churn_events'] = max(1, (int)($state['churn_events'] ?? 0));
+					$state['updated_at'] = $now;
+					$this->setAutoHandoverState($extension, $state);
+					$this->logInfo('Registration Watch auto handover confirmation for extension ' . $extension . ': pre-candidate observation ' . (int)$state['pre_observations']);
+				}
+				continue;
+			}
+
+			if (!$state
+				|| !in_array((string)($state['phase'] ?? ''), ['tracking', 'pre_candidate'], true)
+				|| (int)($state['old_id'] ?? 0) !== $oldId
+				|| (string)($state['old_key'] ?? '') !== $oldKey
+				|| (string)($state['new_key'] ?? '') !== $newKey
+				|| (string)($state['old_ip'] ?? '') !== $oldIp
+				|| (string)($state['new_ip'] ?? '') !== $newIp
+			) {
+				if ($state) {
+					$this->clearAutoHandoverState($extension, 'candidate_changed');
+				}
+				$state = array_merge($candidateTuple, [
+					'phase' => 'tracking',
+					'confirmations' => 1,
+					'churn_events' => 0,
+					'live_signature' => $liveSignature,
+					'first_seen_at' => $now,
+					'updated_at' => $now,
+				]);
+				$this->setAutoHandoverState($extension, $state);
+				$this->logInfo('Registration Watch auto handover candidate first seen for extension ' . $extension . ': old_key=' . $oldKey . ', new_key=' . $newKey . ', old_ip=' . ($oldIp !== '' ? $oldIp : '-') . ', new_ip=' . ($newIp !== '' ? $newIp : '-'));
+				continue;
+			}
+
+			$confirmations = max(1, (int)($state['confirmations'] ?? 1));
+			$churn = max(0, (int)($state['churn_events'] ?? 0));
+			if (($state['phase'] ?? '') === 'pre_candidate') {
+				$churn = max(1, $churn);
+				$confirmations = 1;
+				$state['phase'] = 'tracking';
+				$state['live_signature'] = $liveSignature;
+			} elseif ((string)($state['live_signature'] ?? '') !== $liveSignature) {
+				$confirmations = 1;
+				$churn++;
+				$state['live_signature'] = $liveSignature;
+				$this->logInfo('Registration Watch auto handover candidate reset for extension ' . $extension . ': topology_changed');
+			} else {
+				$confirmations++;
+			}
+
+			$threshold = $churn > 0 ? self::AUTO_HANDOVER_CONFIRM_POLLS_CHURN : self::AUTO_HANDOVER_CONFIRM_POLLS_DEFAULT;
+			$state['confirmations'] = $confirmations;
+			$state['churn_events'] = $churn;
+			$state['updated_at'] = $now;
+			$this->setAutoHandoverState($extension, $state);
+			$this->logInfo('Registration Watch auto handover confirmation for extension ' . $extension . ': ' . $confirmations . '/' . $threshold);
+			if ($confirmations < $threshold) {
+				continue;
+			}
+
+			$db = $this->db();
+			$db->beginTransaction();
+			try {
+				$deleteDuplicate = $db->prepare(
+					'DELETE FROM registrationwatch_registrations
+					WHERE id = :id
+						AND extension = :extension
+						AND registration_key = :registration_key'
+				);
+				$deleteDuplicate->execute([
+					':id' => (int)$duplicateRow['id'],
+					':extension' => $extension,
+					':registration_key' => $newKey,
+				]);
+				if ($deleteDuplicate->rowCount() !== 1) {
+					throw new \RuntimeException('automatic handover duplicate delete precondition failed');
+				}
+
+				$newStatus = $this->normaliseState($replacement['status'] ?? self::STATUS_UNKNOWN);
+				$contactUri = (string)($replacement['contact_uri'] ?? '');
+				$latency = isset($replacement['latency_ms']) && $replacement['latency_ms'] !== null && $replacement['latency_ms'] !== ''
+					? (float)$replacement['latency_ms']
+					: null;
+				$lastSeenAt = $contactUri !== '' ? $now : ($oldRow['last_seen_at'] ?: null);
+
+				$updatePrimary = $db->prepare(
+					'UPDATE registrationwatch_registrations
+					SET registration_key = :registration_key,
+						discovered = 1,
+						auto_disabled_absent_at = NULL,
+						last_known_status = :last_known_status,
+						contact_uri = :contact_uri,
+						latency_ms = :latency_ms,
+						source_ip = :source_ip,
+						source_port = :source_port,
+						registration_ua_class = :registration_ua_class,
+						transport = :transport,
+						user_agent = :user_agent,
+						device_name = :device_name,
+						firmware_version = :firmware_version,
+						contact_count = :contact_count,
+						contact_expires_at = :contact_expires_at,
+						qualify_frequency = :qualify_frequency,
+						last_seen_at = :last_seen_at,
+						last_checked_at = :last_checked_at,
+						last_discovered_at = :last_discovered_at,
+						updated_at = :updated_at
+					WHERE id = :id'
+				);
+				$updatePrimary->execute([
+					':registration_key' => $newKey,
+					':last_known_status' => $newStatus,
+					':contact_uri' => $contactUri !== '' ? $contactUri : null,
+					':latency_ms' => $latency,
+					':source_ip' => $newIp !== '' ? $newIp : null,
+					':source_port' => $replacement['source_port'] ?? null,
+					':registration_ua_class' => $replacement['registration_ua_class'] ?? ($oldRow['registration_ua_class'] ?? ''),
+					':transport' => $replacement['transport'] ?? ($oldRow['transport'] ?? null),
+					':user_agent' => $replacement['user_agent'] ?? ($oldRow['user_agent'] ?? null),
+					':device_name' => $replacement['device_name'] ?? ($oldRow['device_name'] ?? null),
+					':firmware_version' => $replacement['firmware_version'] ?? ($oldRow['firmware_version'] ?? null),
+					':contact_count' => max(1, (int)($replacement['contact_count'] ?? ($oldRow['contact_count'] ?? 1))),
+					':contact_expires_at' => $replacement['contact_expires_at'] ?? ($oldRow['contact_expires_at'] ?? null),
+					':qualify_frequency' => $replacement['qualify_frequency'] ?? ($oldRow['qualify_frequency'] ?? null),
+					':last_seen_at' => $lastSeenAt,
+					':last_checked_at' => $now,
+					':last_discovered_at' => $now,
+					':updated_at' => $now,
+					':id' => $oldId,
+				]);
+
+				$updateEscalation = $db->prepare(
+					'UPDATE registrationwatch_alert_escalation
+					SET registration_key = :registration_key,
+						extension = :extension,
+						updated_at = :updated_at
+					WHERE registration_id = :registration_id'
+				);
+				$updateEscalation->execute([
+					':registration_key' => $newKey,
+					':extension' => $extension,
+					':updated_at' => $now,
+					':registration_id' => $oldId,
+				]);
+
+				$this->insertStatusHistory(
+					$oldId,
+					$newKey,
+					(string)$oldRow['extension'],
+					$oldStatus,
+					$newStatus,
+					'ip_address_change',
+					$contactUri !== '' ? $contactUri : null,
+					$latency,
+					$now
+				);
+
+				$db->commit();
+				$this->setAutoHandoverState($extension, [
+					'phase' => 'validation',
+					'old_key' => $oldKey,
+					'new_key' => $newKey,
+					'validation_observations' => 0,
+					'updated_at' => $now,
+				]);
+				$this->logInfo('Registration Watch auto handover committed for extension ' . $extension . ': old_ip=' . ($oldIp !== '' ? $oldIp : '-') . ', new_ip=' . ($newIp !== '' ? $newIp : '-') . ', old_key=' . $oldKey . ', new_key=' . $newKey);
+			} catch (\Throwable $e) {
+				if ($db->inTransaction()) {
+					$db->rollBack();
+				}
+				$this->logWarning('Registration Watch auto handover skipped for extension ' . $extension . ': ' . $e->getMessage());
+			}
+		}
 	}
 
 	private function disableNonDeviceRegistration(int $registrationId, string $now): void {
@@ -1601,6 +2627,10 @@ class Registrationwatch implements \BMO {
 			}
 			if (!empty($detail['source_ip']) && $this->normaliseSourceIp($detail['source_ip']) === (string)($contact['source_ip'] ?? '')) {
 				$fallbackCandidates[] = $detail;
+				continue;
+			}
+			if (!empty($detail['contact_uri']) && $this->contactUriHostMatchesForEnrichment($detail['contact_uri'], $contact['contact_uri'] ?? null)) {
+				$fallbackCandidates[] = $detail;
 			}
 		}
 
@@ -1617,27 +2647,100 @@ class Registrationwatch implements \BMO {
 					$contact[$field] = $detail[$field];
 				}
 			}
-			if (($detail['source_port'] ?? null) !== null) {
-				$contact['source_port'] = $detail['source_port'];
-			}
+			$contact = $this->applyRegistrarPortDetails($contact, $detail);
 			return $contact;
 		}
 
-		foreach ($fallbackCandidates as $detail) {
-			if (!is_array($detail)) {
-				continue;
+		if (count($fallbackCandidates) === 1) {
+			$detail = $fallbackCandidates[0];
+			if ($this->shouldPromoteRegistrarContactUri(
+				$contact['contact_uri'] ?? null,
+				$detail['contact_uri'] ?? null,
+				$contact['source_ip'] ?? null
+			)) {
+				$contact['contact_uri'] = (string)$detail['contact_uri'];
 			}
+			$contact = $this->applyRegistrarPortDetails($contact, $detail);
 			foreach (['contact_expires_at', 'qualify_frequency'] as $field) {
 				if (($contact[$field] ?? null) === null && ($detail[$field] ?? null) !== null && $detail[$field] !== '') {
 					$contact[$field] = $detail[$field];
 				}
 			}
-			if (($detail['source_port'] ?? null) !== null) {
-				$contact['source_port'] = $detail['source_port'];
-			}
 		}
 
 		return $contact;
+	}
+
+	private function contactUriHostMatchesForEnrichment($leftContactUri, $rightContactUri): bool {
+		$leftAddress = $this->parseContactUriAddress(isset($leftContactUri) ? (string)$leftContactUri : null);
+		$rightAddress = $this->parseContactUriAddress(isset($rightContactUri) ? (string)$rightContactUri : null);
+		$leftHost = $this->normaliseSourceIp($leftAddress['host'] ?? '');
+		$rightHost = $this->normaliseSourceIp($rightAddress['host'] ?? '');
+
+		return $leftHost !== '' && $leftHost === $rightHost;
+	}
+
+	private function normalisePortNumber($value): ?int {
+		if ($value === null || $value === '' || !is_numeric($value)) {
+			return null;
+		}
+
+		$port = (int)$value;
+		return ($port > 0 && $port <= 65535) ? $port : null;
+	}
+
+	private function applyRegistrarPortDetails(array $contact, array $detail): array {
+		$detailSourcePort = $this->normalisePortNumber($detail['source_port'] ?? null);
+		$detailUriAddress = $this->parseContactUriAddress(isset($detail['contact_uri']) ? (string)$detail['contact_uri'] : null);
+		$detailUriPort = $this->normalisePortNumber($detailUriAddress['port'] ?? null);
+
+		$resolvedPort = $detailSourcePort;
+		if ($resolvedPort === null) {
+			$resolvedPort = $detailUriPort;
+		} elseif ($detailUriPort !== null && $detailUriPort !== $resolvedPort) {
+			$sourceText = (string)$resolvedPort;
+			$uriText = (string)$detailUriPort;
+			if (strlen($uriText) > strlen($sourceText) && strpos($uriText, $sourceText) === 0) {
+				$resolvedPort = $detailUriPort;
+			}
+		}
+
+		if ($resolvedPort !== null) {
+			$contact['source_port'] = $resolvedPort;
+		}
+
+		return $contact;
+	}
+
+	private function shouldPromoteRegistrarContactUri($parsedContactUri, $registrarContactUri, $parsedSourceIp): bool {
+		$parsedContactUri = trim((string)$parsedContactUri);
+		$registrarContactUri = trim((string)$registrarContactUri);
+		if ($parsedContactUri === '' || $registrarContactUri === '') {
+			return false;
+		}
+
+		$parsedAddress = $this->parseContactUriAddress($parsedContactUri);
+		$registrarAddress = $this->parseContactUriAddress($registrarContactUri);
+		$parsedHost = $this->normaliseSourceIp($parsedAddress['host'] ?? '');
+		$registrarHost = $this->normaliseSourceIp($registrarAddress['host'] ?? '');
+		if ($parsedHost === '' || $registrarHost === '' || $parsedHost !== $registrarHost) {
+			return false;
+		}
+
+		$parsedPort = $this->normalisePortNumber($parsedAddress['port'] ?? null);
+		$registrarPort = $this->normalisePortNumber($registrarAddress['port'] ?? null);
+		if ($parsedPort === null || $registrarPort === null || $parsedPort === $registrarPort) {
+			return false;
+		}
+
+		$parsedIp = $this->normaliseSourceIp($parsedSourceIp);
+		if ($parsedIp === '' || $parsedIp !== $parsedHost) {
+			return false;
+		}
+
+		$parsedText = (string)$parsedPort;
+		$registrarText = (string)$registrarPort;
+		return strlen($registrarText) > strlen($parsedText) && strpos($registrarText, $parsedText) === 0;
 	}
 
 	private function contactUrisMatchForEnrichment($left, $right): bool {
@@ -2855,6 +3958,15 @@ class Registrationwatch implements \BMO {
 			];
 		}
 
+		// Sangoma P-series user agents include firmware followed by a 12-hex device id.
+		// Example: "Sangoma P330 4_27_8 000FD3D0B030"
+		if (preg_match('/^(Sangoma\s+P[0-9A-Za-z-]+)\s+([0-9]+(?:_[0-9A-Za-z]+)+)\s+([0-9A-Fa-f]{12})$/', $userAgent, $matches)) {
+			return [
+				'device_name' => trim($matches[1] . ' ' . strtoupper($matches[3])) ?: null,
+				'firmware_version' => trim($matches[2]) ?: null,
+			];
+		}
+
 		return [
 			'device_name' => $userAgent,
 			'firmware_version' => null,
@@ -3013,13 +4125,8 @@ class Registrationwatch implements \BMO {
 				}
 			}
 
-			$enabled = 0;
-			foreach ($contacts as $contact) {
-				if ((int)($contact['enabled'] ?? 0)) {
-					$enabled = 1;
-					break;
-				}
-			}
+			$configuredEnabled = $this->getExtensionConfiguredMonitoringState((string)($primary['extension'] ?? ''));
+			$enabled = $configuredEnabled === null ? 0 : $configuredEnabled;
 
 			$discovered = 0;
 			foreach ($contacts as $contact) {
@@ -3783,6 +4890,9 @@ class Registrationwatch implements \BMO {
 				return 'Contact removed';
 			case 'reminder':
 				return 'Repeat alert';
+			case 'ip_address_change':
+			case 'ip address change':
+				return 'IP address change';
 		}
 
 		return $reason !== '' ? $reason : '-';
