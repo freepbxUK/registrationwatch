@@ -44,6 +44,24 @@ function clean_contact_uri(string $value): string {
 	return $value !== '' ? $value : '-';
 }
 
+function parse_user_agent_details_contract(?string $userAgent): array {
+	$userAgent = trim((string)$userAgent);
+	if ($userAgent === '') {
+		return ['device_name' => null, 'firmware_version' => null];
+	}
+	if (preg_match('/^([^\/]+)\/(.+)$/', $userAgent, $matches)) {
+		return ['device_name' => trim($matches[1]) ?: null, 'firmware_version' => trim($matches[2]) ?: null];
+	}
+	if (preg_match('/^(.+?)\s+([0-9]+(?:\.[0-9A-Za-z_-]+)+)$/', $userAgent, $matches)) {
+		return ['device_name' => trim($matches[1]) ?: null, 'firmware_version' => trim($matches[2]) ?: null];
+	}
+	if (preg_match('/^(Sangoma\s+P[0-9A-Za-z-]+)\s+([0-9]+(?:_[0-9A-Za-z]+)+)\s+[0-9A-Fa-f]{12}$/', $userAgent, $matches)) {
+		return ['device_name' => trim($matches[1]) ?: null, 'firmware_version' => trim($matches[2]) ?: null];
+	}
+
+	return ['device_name' => $userAgent, 'firmware_version' => null];
+}
+
 function resolve_identity_group(array $items, array $existingState = []): array {
 	$usable = [];
 	foreach ($items as $item) {
@@ -102,6 +120,13 @@ function resolve_identity_group(array $items, array $existingState = []): array 
 
 	return $items;
 }
+
+$sangomaParsed = parse_user_agent_details_contract('Sangoma P330 4_27_8 000FD3D0B030');
+assert_true($sangomaParsed['device_name'] === 'Sangoma P330', 'Sangoma user-agent parser should keep model as device name');
+assert_true($sangomaParsed['firmware_version'] === '4_27_8', 'Sangoma user-agent parser should extract underscore firmware token');
+
+$slashParsed = parse_user_agent_details_contract('DeskPhone/1.2.3');
+assert_true($slashParsed['device_name'] === 'DeskPhone' && $slashParsed['firmware_version'] === '1.2.3', 'slash user-agent parsing should remain unchanged');
 
 function enrich_for_identity_contract(array $contact, array $registrarDetails): array {
 	$exact = null;

@@ -3803,6 +3803,15 @@ class Registrationwatch implements \BMO {
 			];
 		}
 
+		// Sangoma P-series user agents include firmware followed by a 12-hex device id.
+		// Example: "Sangoma P330 4_27_8 000FD3D0B030"
+		if (preg_match('/^(Sangoma\s+P[0-9A-Za-z-]+)\s+([0-9]+(?:_[0-9A-Za-z]+)+)\s+[0-9A-Fa-f]{12}$/', $userAgent, $matches)) {
+			return [
+				'device_name' => trim($matches[1]) ?: null,
+				'firmware_version' => trim($matches[2]) ?: null,
+			];
+		}
+
 		return [
 			'device_name' => $userAgent,
 			'firmware_version' => null,
