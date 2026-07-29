@@ -416,7 +416,7 @@ This module has been developed with AI assistance for code generation, review, t
 
 ## Release History
 
-### 1.3.0, minor release, 25 July 2026
+### 1.3.0, minor release, 29 July 2026
 
 Released by `@kierknoby, Kieran Knowles-Byrne // FreePBX UK`.
 
