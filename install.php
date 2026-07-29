@@ -48,8 +48,6 @@ $sql[] = "CREATE TABLE IF NOT EXISTS registrationwatch_registrations (
 	KEY registrationwatch_registrations_source_identity (extension, source_ip)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4";
 
-// Phase 4 topology columns are added via the upgrade column-check logic below.
-
 $sql[] = "CREATE TABLE IF NOT EXISTS registrationwatch_status_history (
 	id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
 	registration_id INT UNSIGNED NOT NULL,
@@ -133,6 +131,8 @@ $sql[] = "CREATE TABLE IF NOT EXISTS registrationwatch_alert_escalation (
 foreach ($sql as $statement) {
 	$db->query($statement);
 }
+
+$db->query("ALTER TABLE registrationwatch_registrations MODIFY COLUMN notes VARCHAR(72) NOT NULL DEFAULT ''");
 
 $defaultSettings = [
 	'alert_enabled' => '0',

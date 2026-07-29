@@ -1,6 +1,6 @@
 <?php
 /**
- * Registration Watch for FreePBX 17.
+ * Registration Watch for FreePBX 16 and 17.
  *
  * PJSIP registration discovery and current status visibility.
  *
@@ -13,7 +13,7 @@ namespace FreePBX\modules;
 class Registrationwatch implements \BMO {
 
 	/** Fallback only. Authoritative version lives in module.xml. */
-	const VERSION = '1.2.1';
+	const VERSION = '1.3.0';
 
 	const STATUS_REACHABLE = 'Reachable';
 	const STATUS_UNREACHABLE = 'Unreachable';
