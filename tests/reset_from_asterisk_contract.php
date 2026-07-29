@@ -31,18 +31,26 @@ function extension_reset_snapshot(PDO $db, string $extension): array {
 	}
 
 	$noteValues = [];
-	$noteTimes = [];
+	$preservedRow = null;
 	foreach ($rows as $row) {
-		$noteValues[trim((string)($row['notes'] ?? ''))] = true;
-		$noteTimes[trim((string)($row['notes_updated_at'] ?? ''))] = true;
+		$note = trim((string)($row['notes'] ?? ''));
+		if ($note === '') {
+			continue;
+		}
+
+		$noteValues[$note] = true;
+		if ($preservedRow === null) {
+			$preservedRow = $row;
+		}
 	}
 
-	if (count($noteValues) > 1 || count($noteTimes) > 1) {
+	if (count($noteValues) > 1) {
 		return ['ok' => false, 'message' => 'notes ambiguous'];
 	}
 
 	$enabled = 0;
 	$repeatMode = null;
+	$preservedRow = $preservedRow ?? $rows[0];
 	foreach ($rows as $row) {
 		if ((int)($row['enabled'] ?? 0) === 1) {
 			$enabled = 1;
@@ -57,8 +65,8 @@ function extension_reset_snapshot(PDO $db, string $extension): array {
 		'ok' => true,
 		'enabled' => $enabled,
 		'repeat_mode' => $repeatMode,
-		'notes' => (string)($rows[0]['notes'] ?? ''),
-		'notes_updated_at' => trim((string)($rows[0]['notes_updated_at'] ?? '')) !== '' ? (string)$rows[0]['notes_updated_at'] : null,
+		'notes' => trim((string)($preservedRow['notes'] ?? '')),
+		'notes_updated_at' => trim((string)($preservedRow['notes_updated_at'] ?? '')) !== '' ? (string)$preservedRow['notes_updated_at'] : null,
 	];
 }
 
@@ -292,6 +300,59 @@ assert_true($ext2Placeholder['last_known_status'] === 'Not registered', 'zero-co
 assert_true($ext2Placeholder['notes'] === 'Other site', 'zero-contact reset should keep extension notes');
 
 $db->prepare('INSERT INTO registrationwatch_registrations (registration_key, extension, notes, notes_updated_at, enabled, repeat_mode, last_known_status) VALUES (?, ?, ?, ?, ?, ?, ?)')
+	->execute([hash('sha256', 'blankA'), '3005', 'Shared note', '2026-07-28 08:00:00', 1, 'hourly', 'Reachable']);
+$blank1 = (int)$db->lastInsertId();
+$db->prepare('INSERT INTO registrationwatch_registrations (registration_key, extension, notes, notes_updated_at, enabled, repeat_mode, last_known_status) VALUES (?, ?, ?, ?, ?, ?, ?)')
+	->execute([hash('sha256', 'blankB'), '3005', '', '2026-07-29 08:00:00', 0, 'daily', 'Not registered']);
+$allowed['3005'] = true;
+$blankStaleResult = reset_extension_from_asterisk(
+	$db,
+	$blank1,
+	$allowed,
+	[
+		[
+			'registration_key' => hash('sha256', 'blankLive'),
+			'extension' => '3005',
+			'status' => 'Reachable',
+		],
+	],
+	$now
+);
+assert_true($blankStaleResult['status'] === true, 'reset should ignore blank stale note rows when a non-blank note exists');
+assert_true((int)$db->query("SELECT COUNT(*) FROM registrationwatch_registrations WHERE extension = '3005' AND notes = 'Shared note'")->fetchColumn() === 1, 'preserved non-blank note should be retained once');
+assert_true((int)$db->query("SELECT COUNT(*) FROM registrationwatch_registrations WHERE extension = '3005' AND notes_updated_at = '2026-07-28 08:00:00'")->fetchColumn() === 1, 'preserved note timestamp should come from the retained non-blank note');
+
+$db->prepare('INSERT INTO registrationwatch_registrations (registration_key, extension, notes, notes_updated_at, enabled, repeat_mode, last_known_status) VALUES (?, ?, ?, ?, ?, ?, ?)')
+	->execute([hash('sha256', 'timeA'), '3006', 'Timed note', '2026-07-28 08:00:00', 1, 'daily', 'Reachable']);
+$time1 = (int)$db->lastInsertId();
+$db->prepare('INSERT INTO registrationwatch_registrations (registration_key, extension, notes, notes_updated_at, enabled, repeat_mode, last_known_status) VALUES (?, ?, ?, ?, ?, ?, ?)')
+	->execute([hash('sha256', 'timeB'), '3006', 'Timed note', '2026-07-29 09:30:00', 0, 'hourly', 'Not registered']);
+$allowed['3006'] = true;
+$timestampMatchResult = reset_extension_from_asterisk($db, $time1, $allowed, [], $now);
+assert_true($timestampMatchResult['status'] === true, 'reset should allow matching non-blank notes even when timestamps differ');
+assert_true((int)$db->query("SELECT COUNT(*) FROM registrationwatch_registrations WHERE extension = '3006' AND notes = 'Timed note'")->fetchColumn() === 1, 'matching notes should still be preserved');
+
+$db->prepare('INSERT INTO registrationwatch_registrations (registration_key, extension, notes, notes_updated_at, enabled, repeat_mode, last_known_status) VALUES (?, ?, ?, ?, ?, ?, ?)')
+	->execute([hash('sha256', 'conflictA'), '3007', 'First note', '2026-07-28 08:00:00', 1, null, 'Reachable']);
+$conflict1 = (int)$db->lastInsertId();
+$db->prepare('INSERT INTO registrationwatch_registrations (registration_key, extension, notes, notes_updated_at, enabled, repeat_mode, last_known_status) VALUES (?, ?, ?, ?, ?, ?, ?)')
+	->execute([hash('sha256', 'conflictB'), '3007', 'Second note', '2026-07-28 08:00:00', 1, null, 'Reachable']);
+$allowed['3007'] = true;
+$conflictResult = reset_extension_from_asterisk($db, $conflict1, $allowed, [], $now);
+assert_true($conflictResult['status'] === false, 'reset should fail when two genuinely different non-blank notes exist');
+assert_true($conflictResult['message'] === 'notes ambiguous', 'conflict message should reflect conflicting notes');
+
+$db->prepare('INSERT INTO registrationwatch_registrations (registration_key, extension, notes, notes_updated_at, enabled, repeat_mode, last_known_status) VALUES (?, ?, ?, ?, ?, ?, ?)')
+	->execute([hash('sha256', 'blankOnlyA'), '3008', '', null, 0, 'daily', 'Reachable']);
+$blankOnly1 = (int)$db->lastInsertId();
+$db->prepare('INSERT INTO registrationwatch_registrations (registration_key, extension, notes, notes_updated_at, enabled, repeat_mode, last_known_status) VALUES (?, ?, ?, ?, ?, ?, ?)')
+	->execute([hash('sha256', 'blankOnlyB'), '3008', '', '2026-07-29 10:00:00', 1, 'hourly', 'Not registered']);
+$allowed['3008'] = true;
+$allBlankResult = reset_extension_from_asterisk($db, $blankOnly1, $allowed, [], $now);
+assert_true($allBlankResult['status'] === true, 'reset should succeed when all notes are blank');
+assert_true((int)$db->query("SELECT COUNT(*) FROM registrationwatch_registrations WHERE extension = '3008' AND notes = ''")->fetchColumn() === 1, 'all-blank notes should remain blank after reset');
+
+$db->prepare('INSERT INTO registrationwatch_registrations (registration_key, extension, notes, notes_updated_at, enabled, repeat_mode, last_known_status) VALUES (?, ?, ?, ?, ?, ?, ?)')
 	->execute([hash('sha256', 'ambA'), '3003', 'Left note', '2026-07-28 10:00:00', 1, null, 'Reachable']);
 $amb1 = (int)$db->lastInsertId();
 $db->prepare('INSERT INTO registrationwatch_registrations (registration_key, extension, notes, notes_updated_at, enabled, repeat_mode, last_known_status) VALUES (?, ?, ?, ?, ?, ?, ?)')
@@ -314,14 +375,5 @@ $ambiguousResult = reset_extension_from_asterisk(
 );
 assert_true($ambiguousResult['status'] === false, 'reset should fail safely when notes are ambiguous across extension rows');
 assert_true((int)$db->query("SELECT COUNT(*) FROM registrationwatch_registrations WHERE extension = '3003'")->fetchColumn() === $beforeAmbiguous, 'ambiguous notes should not delete existing extension rows');
-
-$db->prepare('INSERT INTO registrationwatch_registrations (registration_key, extension, notes, notes_updated_at, enabled, repeat_mode, last_known_status) VALUES (?, ?, ?, ?, ?, ?, ?)')
-	->execute([hash('sha256', 'tsA'), '3004', 'Site T', '2026-07-28 10:00:00', 1, null, 'Reachable']);
-$ts1 = (int)$db->lastInsertId();
-$db->prepare('INSERT INTO registrationwatch_registrations (registration_key, extension, notes, notes_updated_at, enabled, repeat_mode, last_known_status) VALUES (?, ?, ?, ?, ?, ?, ?)')
-	->execute([hash('sha256', 'tsB'), '3004', 'Site T', '2026-07-28 11:00:00', 1, null, 'Reachable']);
-$allowed['3004'] = true;
-$timestampAmbiguous = reset_extension_from_asterisk($db, $ts1, $allowed, [], $now);
-assert_true($timestampAmbiguous['status'] === false, 'reset should fail safely when notes timestamps are ambiguous across extension rows');
 
 echo "reset from asterisk contract tests passed\n";

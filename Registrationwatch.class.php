@@ -563,24 +563,32 @@ class Registrationwatch implements \BMO {
 		};
 
 		$noteValues = [];
-		$noteTimestamps = [];
+		$preservedRow = null;
 		foreach ($rows as $row) {
-			$noteValues[$normalise($row['notes'] ?? '')] = true;
-			$noteTimestamps[$normalise($row['notes_updated_at'] ?? '')] = true;
+			$note = $normalise($row['notes'] ?? '');
+			if ($note === '') {
+				continue;
+			}
+
+			$noteValues[$note] = true;
+			if ($preservedRow === null) {
+				$preservedRow = $row;
+			}
 		}
 
-		if (count($noteValues) > 1 || count($noteTimestamps) > 1) {
+		if (count($noteValues) > 1) {
 			return [
 				'ok' => false,
-				'message' => _('Reset cancelled because notes differ across registrations for this extension. Normalise notes first so configuration is not lost.'),
+				'message' => _('Refresh cancelled because this extension has conflicting notes. Make the notes match, then try again.'),
 			];
 		}
 
 		$enabled = 0;
 		$repeatMode = null;
-		$notes = (string)($rows[0]['notes'] ?? '');
-		$notesUpdatedAt = $normalise($rows[0]['notes_updated_at'] ?? '') !== ''
-			? (string)$rows[0]['notes_updated_at']
+		$preservedRow = $preservedRow ?? $rows[0];
+		$notes = $normalise($preservedRow['notes'] ?? '');
+		$notesUpdatedAt = $normalise($preservedRow['notes_updated_at'] ?? '') !== ''
+			? (string)$preservedRow['notes_updated_at']
 			: null;
 
 		foreach ($rows as $row) {
