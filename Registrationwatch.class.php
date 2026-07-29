@@ -2627,6 +2627,10 @@ class Registrationwatch implements \BMO {
 			}
 			if (!empty($detail['source_ip']) && $this->normaliseSourceIp($detail['source_ip']) === (string)($contact['source_ip'] ?? '')) {
 				$fallbackCandidates[] = $detail;
+				continue;
+			}
+			if (!empty($detail['contact_uri']) && $this->contactUriHostMatchesForEnrichment($detail['contact_uri'], $contact['contact_uri'] ?? null)) {
+				$fallbackCandidates[] = $detail;
 			}
 		}
 
@@ -2652,27 +2656,28 @@ class Registrationwatch implements \BMO {
 			if ($this->shouldPromoteRegistrarContactUri(
 				$contact['contact_uri'] ?? null,
 				$detail['contact_uri'] ?? null,
-				$contact['source_ip'] ?? null,
-				$detail['source_ip'] ?? null
+				$contact['source_ip'] ?? null
 			)) {
 				$contact['contact_uri'] = (string)$detail['contact_uri'];
 			}
 			$contact = $this->applyRegistrarPortDetails($contact, $detail);
-		}
-
-		foreach ($fallbackCandidates as $detail) {
-			if (!is_array($detail)) {
-				continue;
-			}
 			foreach (['contact_expires_at', 'qualify_frequency'] as $field) {
 				if (($contact[$field] ?? null) === null && ($detail[$field] ?? null) !== null && $detail[$field] !== '') {
 					$contact[$field] = $detail[$field];
 				}
 			}
-			$contact = $this->applyRegistrarPortDetails($contact, $detail);
 		}
 
 		return $contact;
+	}
+
+	private function contactUriHostMatchesForEnrichment($leftContactUri, $rightContactUri): bool {
+		$leftAddress = $this->parseContactUriAddress(isset($leftContactUri) ? (string)$leftContactUri : null);
+		$rightAddress = $this->parseContactUriAddress(isset($rightContactUri) ? (string)$rightContactUri : null);
+		$leftHost = $this->normaliseSourceIp($leftAddress['host'] ?? '');
+		$rightHost = $this->normaliseSourceIp($rightAddress['host'] ?? '');
+
+		return $leftHost !== '' && $leftHost === $rightHost;
 	}
 
 	private function normalisePortNumber($value): ?int {
@@ -2707,7 +2712,7 @@ class Registrationwatch implements \BMO {
 		return $contact;
 	}
 
-	private function shouldPromoteRegistrarContactUri($parsedContactUri, $registrarContactUri, $parsedSourceIp, $registrarSourceIp): bool {
+	private function shouldPromoteRegistrarContactUri($parsedContactUri, $registrarContactUri, $parsedSourceIp): bool {
 		$parsedContactUri = trim((string)$parsedContactUri);
 		$registrarContactUri = trim((string)$registrarContactUri);
 		if ($parsedContactUri === '' || $registrarContactUri === '') {
@@ -2729,8 +2734,7 @@ class Registrationwatch implements \BMO {
 		}
 
 		$parsedIp = $this->normaliseSourceIp($parsedSourceIp);
-		$registrarIp = $this->normaliseSourceIp($registrarSourceIp);
-		if ($parsedIp === '' || $registrarIp === '' || $parsedIp !== $registrarIp) {
+		if ($parsedIp === '' || $parsedIp !== $parsedHost) {
 			return false;
 		}
 
