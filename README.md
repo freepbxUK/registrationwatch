@@ -473,6 +473,10 @@ extensions whose contact identity changes.
 * Keeps all registration rows for an extension aligned with that configured setting during discovery and reconciliation.
 * Adds a deliberate install/upgrade migration path for legacy row-level monitored data and removes runtime inference from registration rows.
 
+#### Test harness compatibility
+
+* Updates repeat alerting contract test SQL write handling to avoid modern SQLite UPSERT-only syntax so regression tests run consistently on older SQLite environments; production module runtime logic is unchanged.
+
 ### 1.3.0, minor release, 29 July 2026
 
 Released by `@kierknoby, Kieran Knowles-Byrne // FreePBX UK`.

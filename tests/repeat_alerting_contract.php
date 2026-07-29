@@ -277,7 +277,7 @@ function extension_monitoring_state_key_contract(string $extension): string {
 }
 
 function set_extension_monitoring_state_contract(PDO $db, string $extension, int $enabled): void {
-	$db->prepare('INSERT INTO registrationwatch_settings (setting_key, setting_value) VALUES (?, ?) ON CONFLICT(setting_key) DO UPDATE SET setting_value = excluded.setting_value')
+	$db->prepare('INSERT OR REPLACE INTO registrationwatch_settings (setting_key, setting_value) VALUES (?, ?)')
 		->execute([extension_monitoring_state_key_contract($extension), $enabled ? '1' : '0']);
 }
 
@@ -364,19 +364,10 @@ function handoff_escalation(PDO $db, int $registrationId, string $registrationKe
 		->execute([':registration_id' => $registrationId, ':alert_type' => $alertType]);
 
 	$db->prepare(
-		'INSERT INTO registrationwatch_alert_escalation
+		'INSERT OR REPLACE INTO registrationwatch_alert_escalation
 			(registration_id, registration_key, extension, history_id, alert_type, active_since, last_alert_at, alert_count, next_due_at, repeat_mode)
 		VALUES
-			(:registration_id, :registration_key, :extension, :history_id, :alert_type, :active_since, :last_alert_at, :alert_count, :next_due_at, :repeat_mode)
-		ON CONFLICT(registration_id, alert_type) DO UPDATE SET
-			registration_key = excluded.registration_key,
-			extension = excluded.extension,
-			history_id = excluded.history_id,
-			active_since = excluded.active_since,
-			last_alert_at = excluded.last_alert_at,
-			alert_count = excluded.alert_count,
-			next_due_at = excluded.next_due_at,
-			repeat_mode = excluded.repeat_mode'
+			(:registration_id, :registration_key, :extension, :history_id, :alert_type, :active_since, :last_alert_at, :alert_count, :next_due_at, :repeat_mode)'
 	)->execute([
 		':registration_id' => $registrationId,
 		':registration_key' => $registrationKey,
@@ -417,7 +408,7 @@ function rw_get_state(PDO $db, string $extension): array {
 }
 
 function rw_set_state(PDO $db, string $extension, array $state): void {
-	$db->prepare('INSERT INTO registrationwatch_settings (setting_key, setting_value) VALUES (?, ?) ON CONFLICT(setting_key) DO UPDATE SET setting_value = excluded.setting_value')
+	$db->prepare('INSERT OR REPLACE INTO registrationwatch_settings (setting_key, setting_value) VALUES (?, ?)')
 		->execute([rw_state_key($extension), json_encode($state)]);
 }
 
