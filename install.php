@@ -163,9 +163,56 @@ foreach ($defaultSettings as $key => $value) {
 // One-time migration: move legacy row-level enabled state to explicit
 // extension-level monitoring setting keys.
 $migrationMarkerKey = 'extension_monitoring_state_migrated_v1';
-$markerStmt = $db->prepare('SELECT setting_value FROM registrationwatch_settings WHERE setting_key = :setting_key LIMIT 1');
-$markerStmt->execute([':setting_key' => $migrationMarkerKey]);
-$markerExists = $markerStmt->fetchColumn();
+
+$rwFetchAssocRow = static function ($result) {
+	if (!$result || !is_object($result)) {
+		return null;
+	}
+
+	if (method_exists($result, 'fetchRow')) {
+		if (defined('DB_FETCHMODE_ASSOC')) {
+			$row = $result->fetchRow(DB_FETCHMODE_ASSOC);
+		} else {
+			$row = $result->fetchRow();
+		}
+		if ($row === false || $row === null) {
+			return null;
+		}
+		if (is_array($row)) {
+			return $row;
+		}
+		return null;
+	}
+
+	if (method_exists($result, 'fetch')) {
+		$row = $result->fetch();
+		if ($row === false || $row === null) {
+			return null;
+		}
+		if (is_array($row)) {
+			return $row;
+		}
+		return null;
+	}
+
+	return null;
+};
+
+$rwFetchFirstValue = static function ($result) use ($rwFetchAssocRow) {
+	$row = $rwFetchAssocRow($result);
+	if (!is_array($row) || !$row) {
+		return false;
+	}
+
+	foreach ($row as $value) {
+		return $value;
+	}
+
+	return false;
+};
+
+$markerResult = $db->query("SELECT setting_value FROM registrationwatch_settings WHERE setting_key = '" . addslashes($migrationMarkerKey) . "' LIMIT 1");
+$markerExists = $rwFetchFirstValue($markerResult);
 
 if ($markerExists === false) {
 	$rowsStmt = $db->query(
@@ -175,7 +222,16 @@ if ($markerExists === false) {
 		FROM registrationwatch_registrations
 		GROUP BY extension"
 	);
-	$rows = $rowsStmt ? $rowsStmt->fetchAll(PDO::FETCH_ASSOC) : [];
+	$rows = [];
+	if ($rowsStmt) {
+		while (true) {
+			$row = $rwFetchAssocRow($rowsStmt);
+			if (!is_array($row)) {
+				break;
+			}
+			$rows[] = $row;
+		}
+	}
 	$upsertMonitoring = $db->prepare(
 		'INSERT IGNORE INTO registrationwatch_settings (setting_key, setting_value, updated_at)
 		VALUES (:setting_key, :setting_value, :updated_at)'
