@@ -272,6 +272,41 @@ function same_pass_dead_registration_id(PDO $db, string $extension, array $liveC
 	return count($ids) === 1 ? (int)$ids[0] : 0;
 }
 
+function extension_monitoring_state_key_contract(string $extension): string {
+	return 'extension_monitoring_state_' . strtolower(trim($extension));
+}
+
+function set_extension_monitoring_state_contract(PDO $db, string $extension, int $enabled): void {
+	$db->prepare('INSERT INTO registrationwatch_settings (setting_key, setting_value) VALUES (?, ?) ON CONFLICT(setting_key) DO UPDATE SET setting_value = excluded.setting_value')
+		->execute([extension_monitoring_state_key_contract($extension), $enabled ? '1' : '0']);
+}
+
+function get_extension_monitoring_state_contract(PDO $db, string $extension): ?int {
+	$stmt = $db->prepare('SELECT setting_value FROM registrationwatch_settings WHERE setting_key = ?');
+	$stmt->execute([extension_monitoring_state_key_contract($extension)]);
+	$value = $stmt->fetchColumn();
+	if ($value === false || $value === null || trim((string)$value) === '') {
+		return null;
+	}
+	return trim((string)$value) === '1' ? 1 : 0;
+}
+
+function normalise_extension_monitoring_state_contract(PDO $db): void {
+	$extensions = $db->query('SELECT DISTINCT extension FROM registrationwatch_registrations')->fetchAll(PDO::FETCH_COLUMN, 0);
+	$updateEnabled = $db->prepare('UPDATE registrationwatch_registrations SET enabled = ? WHERE extension = ? AND enabled <> ?');
+	$clearAutoDisabled = $db->prepare('UPDATE registrationwatch_registrations SET auto_disabled_absent_at = NULL WHERE extension = ? AND auto_disabled_absent_at IS NOT NULL');
+	foreach ($extensions as $extension) {
+		$configured = get_extension_monitoring_state_contract($db, (string)$extension);
+		if ($configured === null) {
+			continue;
+		}
+		$updateEnabled->execute([$configured, (string)$extension, $configured]);
+		if ($configured === 1) {
+			$clearAutoDisabled->execute([(string)$extension]);
+		}
+	}
+}
+
 function promote_live_contact_same_pass(PDO $db, array $liveContact, array $liveContactsByKey): int {
 	$registrationKey = (string)$liveContact['registration_key'];
 	$extension = strtolower(trim((string)$liveContact['extension']));
@@ -301,8 +336,10 @@ function promote_live_contact_same_pass(PDO $db, array $liveContact, array $live
 		return $deadId;
 	}
 
+	$configured = get_extension_monitoring_state_contract($db, $extension);
+	$enabled = $configured === null ? 0 : $configured;
 	$db->prepare('INSERT INTO registrationwatch_registrations (registration_key, extension, source_ip, source_port, enabled, repeat_mode, last_known_status, discovered) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
-		->execute([$registrationKey, $extension, (string)($liveContact['source_ip'] ?? ''), $liveContact['source_port'] ?? null, 0, null, 'Unknown', 1]);
+		->execute([$registrationKey, $extension, (string)($liveContact['source_ip'] ?? ''), $liveContact['source_port'] ?? null, $enabled, null, 'Unknown', 1]);
 
 	return (int)$db->lastInsertId();
 }
@@ -832,6 +869,89 @@ if (!$deferForEmptyAllowlist) {
 }
 assert_true($deferForEmptyAllowlist, 'empty allowlist with stored registrations should defer reconciliation');
 assert_true((int)$db->query("SELECT enabled FROM registrationwatch_registrations WHERE id = {$safeReg}")->fetchColumn() === 1, 'empty allowlist fail-safe should leave stored registrations enabled and untouched');
+
+$inheritExt = '2020';
+$inheritOldKey = registration_key($inheritExt, '198.51.100.170');
+$inheritNewKey = registration_key($inheritExt, '198.51.100.171');
+set_extension_monitoring_state_contract($db, $inheritExt, 1);
+$db->prepare('INSERT INTO registrationwatch_registrations (registration_key, extension, source_ip, enabled, repeat_mode, last_known_status, discovered) VALUES (?, ?, ?, ?, ?, ?, ?)')
+	->execute([$inheritOldKey, $inheritExt, '198.51.100.170', 1, null, 'Reachable', 1]);
+$inheritInsertedId = promote_live_contact_same_pass($db, [
+	'registration_key' => $inheritNewKey,
+	'extension' => $inheritExt,
+	'source_ip' => '198.51.100.171',
+	'source_port' => 5060,
+	'status' => 'Reachable',
+], [
+	$inheritOldKey => ['registration_key' => $inheritOldKey],
+	$inheritNewKey => ['registration_key' => $inheritNewKey],
+]);
+assert_true((int)$db->query("SELECT COUNT(*) FROM registrationwatch_registrations WHERE extension = '2020'")->fetchColumn() === 2, 'monitored extension discovering a second endpoint should retain both registration rows');
+assert_true((int)$db->query("SELECT enabled FROM registrationwatch_registrations WHERE id = {$inheritInsertedId}")->fetchColumn() === 1, 'new registration discovered under a monitored extension should inherit enabled monitoring');
+
+$mixedExt = '2021';
+$mixedKeyA = registration_key($mixedExt, '198.51.100.180');
+$mixedKeyB = registration_key($mixedExt, '198.51.100.181');
+set_extension_monitoring_state_contract($db, $mixedExt, 1);
+$db->prepare('INSERT INTO registrationwatch_registrations (registration_key, extension, source_ip, enabled, auto_disabled_absent_at, repeat_mode, last_known_status, discovered) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+	->execute([$mixedKeyA, $mixedExt, '198.51.100.180', 1, null, null, 'Reachable', 1]);
+$db->prepare('INSERT INTO registrationwatch_registrations (registration_key, extension, source_ip, enabled, auto_disabled_absent_at, repeat_mode, last_known_status, discovered) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+	->execute([$mixedKeyB, $mixedExt, '198.51.100.181', 0, '2026-06-15 09:00:00', null, 'Not registered', 1]);
+normalise_extension_monitoring_state_contract($db);
+assert_true((int)$db->query("SELECT COUNT(*) FROM registrationwatch_registrations WHERE extension = '2021' AND enabled = 0")->fetchColumn() === 0, 'reconciliation safety should correct mixed enabled/disabled rows on monitored extension');
+assert_true((int)$db->query("SELECT COUNT(*) FROM registrationwatch_registrations WHERE extension = '2021' AND auto_disabled_absent_at IS NOT NULL")->fetchColumn() === 0, 'reconciliation safety should clear stale absent auto-disable markers on monitored extension rows');
+
+$disableExt = '2023';
+$disableKeyA = registration_key($disableExt, '198.51.100.200');
+$disableKeyB = registration_key($disableExt, '198.51.100.201');
+set_extension_monitoring_state_contract($db, $disableExt, 1);
+$db->prepare('INSERT INTO registrationwatch_registrations (registration_key, extension, source_ip, enabled, repeat_mode, last_known_status, discovered) VALUES (?, ?, ?, ?, ?, ?, ?)')
+	->execute([$disableKeyA, $disableExt, '198.51.100.200', 1, null, 'Reachable', 1]);
+$db->prepare('INSERT INTO registrationwatch_registrations (registration_key, extension, source_ip, enabled, repeat_mode, last_known_status, discovered) VALUES (?, ?, ?, ?, ?, ?, ?)')
+	->execute([$disableKeyB, $disableExt, '198.51.100.201', 1, null, 'Reachable', 1]);
+set_extension_monitoring_state_contract($db, $disableExt, 0);
+normalise_extension_monitoring_state_contract($db);
+assert_true((int)$db->query("SELECT COUNT(*) FROM registrationwatch_registrations WHERE extension = '2023' AND enabled = 1")->fetchColumn() === 0, 'disabling monitoring for an extension should disable all registrations');
+
+$enableExt = '2024';
+$enableKeyA = registration_key($enableExt, '198.51.100.210');
+$enableKeyB = registration_key($enableExt, '198.51.100.211');
+set_extension_monitoring_state_contract($db, $enableExt, 0);
+$db->prepare('INSERT INTO registrationwatch_registrations (registration_key, extension, source_ip, enabled, repeat_mode, last_known_status, discovered) VALUES (?, ?, ?, ?, ?, ?, ?)')
+	->execute([$enableKeyA, $enableExt, '198.51.100.210', 0, null, 'Unknown', 1]);
+$db->prepare('INSERT INTO registrationwatch_registrations (registration_key, extension, source_ip, enabled, repeat_mode, last_known_status, discovered) VALUES (?, ?, ?, ?, ?, ?, ?)')
+	->execute([$enableKeyB, $enableExt, '198.51.100.211', 0, null, 'Unknown', 1]);
+set_extension_monitoring_state_contract($db, $enableExt, 1);
+normalise_extension_monitoring_state_contract($db);
+assert_true((int)$db->query("SELECT COUNT(*) FROM registrationwatch_registrations WHERE extension = '2024' AND enabled = 1")->fetchColumn() === 2, 'enabling monitoring for an extension should enable all registrations');
+
+$noSettingExt = '2025';
+$noSettingOldKey = registration_key($noSettingExt, '198.51.100.220');
+$noSettingNewKey = registration_key($noSettingExt, '198.51.100.221');
+$db->prepare('INSERT INTO registrationwatch_registrations (registration_key, extension, source_ip, enabled, repeat_mode, last_known_status, discovered) VALUES (?, ?, ?, ?, ?, ?, ?)')
+	->execute([$noSettingOldKey, $noSettingExt, '198.51.100.220', 1, null, 'Reachable', 1]);
+$noSettingInsertedId = promote_live_contact_same_pass($db, [
+	'registration_key' => $noSettingNewKey,
+	'extension' => $noSettingExt,
+	'source_ip' => '198.51.100.221',
+	'source_port' => 5060,
+	'status' => 'Reachable',
+], [
+	$noSettingOldKey => ['registration_key' => $noSettingOldKey],
+	$noSettingNewKey => ['registration_key' => $noSettingNewKey],
+]);
+assert_true((int)$db->query("SELECT enabled FROM registrationwatch_registrations WHERE id = {$noSettingInsertedId}")->fetchColumn() === 0, 'missing extension monitoring setting should not infer monitored authority from existing enabled rows');
+
+$unmonitoredExt = '2022';
+$unmonitoredKeyA = registration_key($unmonitoredExt, '198.51.100.190');
+$unmonitoredKeyB = registration_key($unmonitoredExt, '198.51.100.191');
+set_extension_monitoring_state_contract($db, $unmonitoredExt, 0);
+$db->prepare('INSERT INTO registrationwatch_registrations (registration_key, extension, source_ip, enabled, repeat_mode, last_known_status, discovered) VALUES (?, ?, ?, ?, ?, ?, ?)')
+	->execute([$unmonitoredKeyA, $unmonitoredExt, '198.51.100.190', 0, null, 'Unknown', 1]);
+$db->prepare('INSERT INTO registrationwatch_registrations (registration_key, extension, source_ip, enabled, repeat_mode, last_known_status, discovered) VALUES (?, ?, ?, ?, ?, ?, ?)')
+	->execute([$unmonitoredKeyB, $unmonitoredExt, '198.51.100.191', 0, null, 'Unknown', 1]);
+normalise_extension_monitoring_state_contract($db);
+assert_true((int)$db->query("SELECT COUNT(*) FROM registrationwatch_registrations WHERE extension = '2022' AND enabled = 1")->fetchColumn() === 0, 'unmonitored extensions should remain unmonitored');
 
 $placeholderKey = no_contact_registration_key('2006');
 $db->prepare('INSERT INTO registrationwatch_registrations (registration_key, extension, source_ip, enabled, repeat_mode, last_known_status) VALUES (?, ?, ?, ?, ?, ?)')

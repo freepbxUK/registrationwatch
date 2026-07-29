@@ -42,6 +42,7 @@ class Registrationwatch implements \BMO {
 	];
 	const AUTO_HANDOVER_STATE_PREFIX = 'auto_handover_state_';
 	const AUTO_HANDOVER_BULK_STATE_KEY = 'auto_handover_bulk_state';
+	const EXTENSION_MONITORING_SETTING_PREFIX = 'extension_monitoring_state_';
 	const AUTO_HANDOVER_CONFIRM_POLLS_DEFAULT = 2;
 	const AUTO_HANDOVER_CONFIRM_POLLS_CHURN = 3;
 	const AUTO_HANDOVER_VALIDATION_POLLS = 3;
@@ -374,6 +375,8 @@ class Registrationwatch implements \BMO {
 			return ['status' => false, 'message' => _('Missing watched registration.')];
 		}
 
+		$this->setExtensionConfiguredMonitoringState($extension, $enabled);
+
 		$stmt = $db->prepare('UPDATE registrationwatch_registrations SET enabled = :enabled, updated_at = :updated_at WHERE extension = :extension');
 		$stmt->execute([
 			':enabled' => $enabled,
@@ -388,6 +391,34 @@ class Registrationwatch implements \BMO {
 			'enabled' => $enabled,
 			'monitoringState' => $this->getMonitoringState(),
 		];
+	}
+
+	private function extensionMonitoringSettingKey(string $extension): string {
+		return self::EXTENSION_MONITORING_SETTING_PREFIX . $this->normaliseRegistrationExtension($extension);
+	}
+
+	private function setExtensionConfiguredMonitoringState(string $extension, int $enabled): void {
+		$normalised = $this->normaliseRegistrationExtension($extension);
+		if ($normalised === '') {
+			return;
+		}
+		$this->setSetting($this->extensionMonitoringSettingKey($normalised), $enabled ? '1' : '0');
+	}
+
+	private function getExtensionConfiguredMonitoringState(string $extension): ?int {
+		$normalised = $this->normaliseRegistrationExtension($extension);
+		if ($normalised === '') {
+			return null;
+		}
+
+		$stmt = $this->db()->prepare('SELECT setting_value FROM registrationwatch_settings WHERE setting_key = :setting_key LIMIT 1');
+		$stmt->execute([':setting_key' => $this->extensionMonitoringSettingKey($normalised)]);
+		$value = $stmt->fetchColumn();
+		if ($value !== false && $value !== null && trim((string)$value) !== '') {
+			return trim((string)$value) === '1' ? 1 : 0;
+		}
+
+		return null;
 	}
 
 	private function handleResetExtensionFromAsterisk(): array {
@@ -591,7 +622,8 @@ class Registrationwatch implements \BMO {
 			];
 		}
 
-		$enabled = 0;
+		$enabledConfigured = $this->getExtensionConfiguredMonitoringState($extension);
+		$enabled = $enabledConfigured === null ? 0 : $enabledConfigured;
 		$repeatMode = null;
 		$preservedRow = $preservedRow ?? $rows[0];
 		$notes = $normalise($preservedRow['notes'] ?? '');
@@ -600,9 +632,6 @@ class Registrationwatch implements \BMO {
 			: null;
 
 		foreach ($rows as $row) {
-			if ((int)($row['enabled'] ?? 0) === 1) {
-				$enabled = 1;
-			}
 			$currentRepeat = isset($row['repeat_mode']) && trim((string)$row['repeat_mode']) !== ''
 				? $this->normaliseRepeatMode((string)$row['repeat_mode'])
 				: null;
@@ -1251,7 +1280,10 @@ class Registrationwatch implements \BMO {
 				continue;
 			}
 
-			$this->logInfo('Registration Watch continuity fallback insert enabled=0 for extension ' . $this->normaliseRegistrationExtension($extension) . ', registration_key ' . (string)$registration['registration_key']);
+			$normalisedExtension = $this->normaliseRegistrationExtension($extension);
+			$configuredMonitoringState = $this->getExtensionConfiguredMonitoringState($normalisedExtension);
+			$inheritedEnabled = $configuredMonitoringState === null ? 0 : $configuredMonitoringState;
+			$this->logInfo('Registration Watch continuity fallback insert enabled=' . $inheritedEnabled . ' for extension ' . $normalisedExtension . ', registration_key ' . (string)$registration['registration_key']);
 
 			$insert = $db->prepare(
 				'INSERT INTO registrationwatch_registrations
@@ -1259,7 +1291,7 @@ class Registrationwatch implements \BMO {
 					 source_ip, source_port, registration_ua_class, transport, user_agent, device_name, firmware_version,
 					 contact_count, contact_expires_at, qualify_frequency, created_at, updated_at, first_discovered_at, last_discovered_at)
 				VALUES
-					(:registration_key, :extension, :description, 0, 1, :last_known_status, :contact_uri,
+					(:registration_key, :extension, :description, :enabled, 1, :last_known_status, :contact_uri,
 					 :source_ip, :source_port, :registration_ua_class, :transport, :user_agent, :device_name, :firmware_version,
 					 :contact_count, :contact_expires_at, :qualify_frequency, :created_at, :updated_at, :first_discovered_at, :last_discovered_at)'
 			);
@@ -1267,6 +1299,7 @@ class Registrationwatch implements \BMO {
 				':registration_key' => $registration['registration_key'],
 				':extension' => $extension,
 				':description' => $descriptions[$extension] ?? '',
+				':enabled' => $inheritedEnabled,
 				':last_known_status' => self::STATUS_UNKNOWN,
 				':contact_uri' => $registration['contact_uri'] ?? null,
 				':source_ip' => $registration['source_ip'] ?? null,
@@ -1295,19 +1328,22 @@ class Registrationwatch implements \BMO {
 			if (isset($liveExtensions[$extension]) || ($knownCounts[$extension] ?? 0) > 0) {
 				continue;
 			}
+			$configuredMonitoringState = $this->getExtensionConfiguredMonitoringState($extension);
+			$enabled = $configuredMonitoringState === null ? 0 : $configuredMonitoringState;
 
 			$stmt = $this->db()->prepare(
 				'INSERT IGNORE INTO registrationwatch_registrations
 					(registration_key, extension, description, enabled, discovered, last_known_status,
 					 contact_count, created_at, updated_at, first_discovered_at, last_discovered_at)
 				VALUES
-					(:registration_key, :extension, :description, 0, 1, :last_known_status,
+					(:registration_key, :extension, :description, :enabled, 1, :last_known_status,
 					 1, :created_at, :updated_at, :first_discovered_at, :last_discovered_at)'
 			);
 			$stmt->execute([
 				':registration_key' => $this->noContactRegistrationKey($extension),
 				':extension' => $extension,
 				':description' => $descriptions[$extension] ?? '',
+				':enabled' => $enabled,
 				':last_known_status' => self::STATUS_UNKNOWN,
 				':created_at' => $now,
 				':updated_at' => $now,
@@ -1328,6 +1364,47 @@ class Registrationwatch implements \BMO {
 		}
 
 		return $counts;
+	}
+
+	private function normaliseExtensionMonitoringState(array $allowedDevices, string $now): void {
+		$extensionsStmt = $this->db()->query('SELECT DISTINCT extension FROM registrationwatch_registrations');
+		$extensions = $extensionsStmt ? $extensionsStmt->fetchAll(\PDO::FETCH_COLUMN, 0) : [];
+		$updateEnabled = $this->db()->prepare(
+			'UPDATE registrationwatch_registrations
+			SET enabled = :enabled,
+				updated_at = :updated_at
+			WHERE extension = :extension
+				AND enabled <> :enabled'
+		);
+		$clearAutoDisabled = $this->db()->prepare(
+			'UPDATE registrationwatch_registrations
+			SET auto_disabled_absent_at = NULL,
+				updated_at = :updated_at
+			WHERE extension = :extension
+				AND auto_disabled_absent_at IS NOT NULL'
+		);
+
+		foreach ($extensions as $extension) {
+			$normalised = $this->normaliseRegistrationExtension((string)$extension);
+			if ($normalised === '' || !isset($allowedDevices[$normalised])) {
+				continue;
+			}
+			$configured = $this->getExtensionConfiguredMonitoringState($normalised);
+			if ($configured === null) {
+				continue;
+			}
+			$updateEnabled->execute([
+				':enabled' => $configured,
+				':updated_at' => $now,
+				':extension' => $normalised,
+			]);
+			if ($configured === 1) {
+				$clearAutoDisabled->execute([
+					':updated_at' => $now,
+					':extension' => $normalised,
+				]);
+			}
+		}
 	}
 
 	private function hasStoredRegistrations(): bool {
@@ -1631,6 +1708,7 @@ class Registrationwatch implements \BMO {
 		$contacts = $this->getLiveContacts($allowedDevices);
 		$this->syncDiscoveredRegistrations($contacts, $allowedDevices);
 		$now = $this->now();
+		$this->normaliseExtensionMonitoringState($allowedDevices, $now);
 		$this->applyAutomaticIpChangeHandover($contacts, $allowedDevices, $now);
 		$db = $this->db();
 		$registrations = $this->getStoredRegistrations();
@@ -1757,6 +1835,8 @@ class Registrationwatch implements \BMO {
 				':id' => $registrationId,
 			]);
 		}
+
+		$this->normaliseExtensionMonitoringState($allowedDevices, $now);
 
 		$this->processAlertQueue($now);
 	}
@@ -3970,13 +4050,8 @@ class Registrationwatch implements \BMO {
 				}
 			}
 
-			$enabled = 0;
-			foreach ($contacts as $contact) {
-				if ((int)($contact['enabled'] ?? 0)) {
-					$enabled = 1;
-					break;
-				}
-			}
+			$configuredEnabled = $this->getExtensionConfiguredMonitoringState((string)($primary['extension'] ?? ''));
+			$enabled = $configuredEnabled === null ? 0 : $configuredEnabled;
 
 			$discovered = 0;
 			foreach ($contacts as $contact) {

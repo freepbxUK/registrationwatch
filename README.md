@@ -220,6 +220,15 @@ threshold, history pruning policies, global monitoring snooze state, and
 remembered UI preferences such as the Cards/Rows view choice, sort columns, and
 sort directions.
 
+Extension monitoring authority is also stored in `registrationwatch_settings`
+using keys in the form `extension_monitoring_state_<extension>` (`1` or `0`).
+These keys are the authoritative monitored/unmonitored state used by runtime
+reconciliation and discovery for each extension.
+
+A one-time install/upgrade migration marker
+`extension_monitoring_state_migrated_v1` records that legacy row-level monitored
+states were migrated to extension monitoring settings.
+
 `registrationwatch_alert_history` stores one row per recipient and alert
 decision. The unique key `registrationwatch_alert_unique_transition_recipient`
 prevents repeated handling of the same transition, alert type, and recipient.
@@ -237,6 +246,11 @@ Alerts are generated from reconciliation-created transition rows.
 Discovered registrations for configured PJSIP devices are listed in the Watched
 Extensions table but not monitored by default. Enable the Monitored toggle for
 any registration that should generate alerts.
+
+Monitoring authority is extension-level. The UI Monitored toggle writes the
+extension monitoring setting, and all registration rows for that extension are
+kept consistent with this setting. Runtime behaviour does not infer extension
+authority from `registrationwatch_registrations.enabled`.
 
 Defaults:
 
@@ -320,7 +334,7 @@ The admin page supports narrow and mobile viewports, while wide data tables reta
 * **Monitoring banner** -- shows the current monitoring state (active, inactive, or snoozed) with Snooze/Resume controls.
 * **Registration Status Map** -- shows all discovered registrations. Supports Cards and Rows views. The Row view has sortable columns.
 * **Alert Settings** -- configures recipients, alert triggers, debounce, repeat alerts, storm threshold, and topology polling.
-* **Watched Extensions** -- lists watched registrations with per-registration monitoring toggles, repeat-alert overrides, and admin notes. Columns are sortable.
+* **Watched Extensions** -- lists watched registrations with extension-level monitoring toggles, repeat-alert overrides, and admin notes. Columns are sortable.
 * **Status History** -- records registration state transitions. Columns are sortable.
 * **Alert History** -- records sent and suppressed alert attempts. Columns are sortable.
 
@@ -451,6 +465,13 @@ extensions whose contact identity changes.
 
 * Improves registrar user-agent parsing for Sangoma P-series phones so firmware tokens such as `4_27_8` are shown in Version instead of `-` when present.
 * Normalises user-facing reason labels so `ip_address_change` renders as `IP Address Change`.
+
+#### Monitoring state authority
+
+* Treats extension monitoring state configured by the UI as the only runtime authority.
+* Stores extension monitoring state in `registrationwatch_settings` keys named `extension_monitoring_state_<extension>`.
+* Keeps all registration rows for an extension aligned with that configured setting during discovery and reconciliation.
+* Adds a deliberate install/upgrade migration path for legacy row-level monitored data and removes runtime inference from registration rows.
 
 ### 1.3.0, minor release, 29 July 2026
 
