@@ -2939,6 +2939,32 @@ class Registrationwatch implements \BMO {
 
 		$deviceAddress = $hasOriginalAddress ? $originalAddress : $contactAddress;
 		$networkAddress = $hasOriginalAddress ? $contactAddress : ['host' => null, 'port' => null];
+		$normalisedSourceIp = $this->normaliseSourceIp($sourceIp);
+		$sourcePortNumber = null;
+		if ($sourcePort !== null && $sourcePort !== '' && is_numeric($sourcePort)) {
+			$candidatePort = (int)$sourcePort;
+			if ($candidatePort > 0 && $candidatePort <= 65535) {
+				$sourcePortNumber = $candidatePort;
+			}
+		}
+
+		if (!$hasOriginalAddress
+			&& $sourcePortNumber !== null
+			&& ($contactAddress['port'] ?? null) !== null
+			&& $normalisedSourceIp !== ''
+			&& $this->normaliseSourceIp((string)($contactAddress['host'] ?? '')) === $normalisedSourceIp
+		) {
+			$parsedPort = (int)$contactAddress['port'];
+			$parsedPortText = (string)$parsedPort;
+			$sourcePortText = (string)$sourcePortNumber;
+			if ($parsedPort !== $sourcePortNumber
+				&& strlen($sourcePortText) > strlen($parsedPortText)
+				&& strpos($sourcePortText, $parsedPortText) === 0
+			) {
+				$deviceAddress['port'] = $sourcePortNumber;
+				$networkAddress['port'] = $sourcePortNumber;
+			}
+		}
 
 		if ($networkAddress['host'] === null && trim((string)$sourceIp) !== '') {
 			$networkAddress['host'] = $sourceIp;
@@ -4815,7 +4841,7 @@ class Registrationwatch implements \BMO {
 				return 'Repeat alert';
 			case 'ip_address_change':
 			case 'ip address change':
-				return 'IP Address Change';
+				return 'IP address change';
 		}
 
 		return $reason !== '' ? $reason : '-';
