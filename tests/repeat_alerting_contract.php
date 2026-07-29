@@ -55,8 +55,8 @@ function parse_user_agent_details_contract(?string $userAgent): array {
 	if (preg_match('/^(.+?)\s+([0-9]+(?:\.[0-9A-Za-z_-]+)+)$/', $userAgent, $matches)) {
 		return ['device_name' => trim($matches[1]) ?: null, 'firmware_version' => trim($matches[2]) ?: null];
 	}
-	if (preg_match('/^(Sangoma\s+P[0-9A-Za-z-]+)\s+([0-9]+(?:_[0-9A-Za-z]+)+)\s+[0-9A-Fa-f]{12}$/', $userAgent, $matches)) {
-		return ['device_name' => trim($matches[1]) ?: null, 'firmware_version' => trim($matches[2]) ?: null];
+	if (preg_match('/^(Sangoma\s+P[0-9A-Za-z-]+)\s+([0-9]+(?:_[0-9A-Za-z]+)+)\s+([0-9A-Fa-f]{12})$/', $userAgent, $matches)) {
+		return ['device_name' => trim($matches[1] . ' ' . strtoupper($matches[3])) ?: null, 'firmware_version' => trim($matches[2]) ?: null];
 	}
 
 	return ['device_name' => $userAgent, 'firmware_version' => null];
@@ -122,7 +122,7 @@ function resolve_identity_group(array $items, array $existingState = []): array 
 }
 
 $sangomaParsed = parse_user_agent_details_contract('Sangoma P330 4_27_8 000FD3D0B030');
-assert_true($sangomaParsed['device_name'] === 'Sangoma P330', 'Sangoma user-agent parser should keep model as device name');
+assert_true($sangomaParsed['device_name'] === 'Sangoma P330 000FD3D0B030', 'Sangoma user-agent parser should retain trailing 12-character device identifier');
 assert_true($sangomaParsed['firmware_version'] === '4_27_8', 'Sangoma user-agent parser should extract underscore firmware token');
 
 $slashParsed = parse_user_agent_details_contract('DeskPhone/1.2.3');
