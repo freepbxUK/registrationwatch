@@ -54,7 +54,38 @@ fwconsole chown
 fwconsole reload
 ```
 
-**Option 2: Developer install from GitHub**
+### Option 2: Install from GitHub
+
+FreePBX 16 / PBXact 16 (CentOS 7)
+
+Check whether Git is installed:
+
+```sh
+rpm -q git
+```
+
+If Git is not installed:
+
+```sh
+yum install -y git
+```
+
+FreePBX 17 / PBXact 17 (Debian 12)
+
+Check whether Git is installed:
+
+```sh
+dpkg -l git
+```
+
+If Git is not installed:
+
+```sh
+apt update
+apt install -y git
+```
+
+Then run the following commands as root:
 
 ```sh
 cd /var/www/html/admin/modules
