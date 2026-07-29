@@ -447,6 +447,11 @@ extensions whose contact identity changes.
 * Preserves extension-level monitoring configuration, repeat alert mode, and administrator notes where they can be safely retained.
 * Preserves Status History and Alert History audit tables.
 
+#### Metadata and display polish
+
+* Improves registrar user-agent parsing for Sangoma P-series phones so firmware tokens such as `4_27_8` are shown in Version instead of `-` when present.
+* Normalises user-facing reason labels so `ip_address_change` renders as `IP Address Change`.
+
 ### 1.3.0, minor release, 29 July 2026
 
 Released by `@kierknoby, Kieran Knowles-Byrne // FreePBX UK`.
