@@ -262,6 +262,21 @@ body:has(.registrationwatch) #page_body {
 	min-height: 150px;
 }
 
+.registrationwatch .rw-map-tile-ok {
+	background: #dff0d8;
+	border-color: #c9e2b3;
+}
+
+.registrationwatch .rw-map-tile-bad {
+	background: #f2dede;
+	border-color: #ebcccc;
+}
+
+.registrationwatch .rw-map-tile-neutral {
+	background: #fff;
+	border-color: #ddd;
+}
+
 .registrationwatch .rw-map-title {
 	display: flex;
 	align-items: center;
@@ -336,6 +351,18 @@ body:has(.registrationwatch) #page_body {
 	font-size: 12px;
 	vertical-align: middle !important;
 	white-space: nowrap;
+}
+
+.registrationwatch .rw-map-row-view > tbody > tr.rw-map-row-ok > td {
+	background-color: #dff0d8 !important;
+}
+
+.registrationwatch .rw-map-row-view > tbody > tr.rw-map-row-bad > td {
+	background-color: #f2dede !important;
+}
+
+.registrationwatch .rw-map-row-view > tbody > tr.rw-map-row-neutral > td {
+	background-color: #fff !important;
 }
 
 .registrationwatch .rw-map-row-view td:nth-child(3) {

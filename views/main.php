@@ -87,21 +87,23 @@ if (!array_key_exists($currentRepeatMode, $repeatModeOptions)) {
 	$currentRepeatMode = 'never';
 }
 
-$_rwStatusClass = function ($status) {
-	switch (strtolower(trim((string)$status))) {
-		case 'reachable':
-			return 'rw-led-green';
-		case 'registered (no qualify)':
-		case 'registered_no_qualify':
-			return 'rw-led-amber';
-		case 'unreachable':
-		case 'not registered':
-		case 'not_registered':
-			return 'rw-led-red';
-		case 'unknown':
-		default:
-			return 'rw-led-grey';
+$_rwMapVisualState = function ($registration) {
+	$status = strtolower(trim((string)($registration['last_known_status'] ?? '')));
+	$enabled = !empty($registration['enabled']);
+
+	if (!$enabled) {
+		return 'neutral';
 	}
+
+	if ($status === 'reachable') {
+		return 'ok';
+	}
+
+	if ($status === 'unreachable' || $status === 'not registered' || $status === 'not_registered') {
+		return 'bad';
+	}
+
+	return 'neutral';
 };
 
 $_rwIsRegisteredNoQualify = function ($status) {
@@ -319,9 +321,14 @@ $_rwAssetVer = max(
 						<?php else: ?>
 							<div class="rw-registration-map">
 								<?php foreach ($mapVisibleRegistrations as $registration): ?>
-									<div class="rw-map-tile">
+									<?php
+									$mapVisualState = $_rwMapVisualState($registration);
+									$mapTileClass = $mapVisualState === 'ok' ? 'rw-map-tile-ok' : ($mapVisualState === 'bad' ? 'rw-map-tile-bad' : 'rw-map-tile-neutral');
+									$mapLedClass = $mapVisualState === 'ok' ? 'rw-led-green' : ($mapVisualState === 'bad' ? 'rw-led-red' : 'rw-led-grey');
+									?>
+									<div class="rw-map-tile <?php echo $mapTileClass; ?>">
 										<div class="rw-map-title">
-											<span class="rw-led <?php echo $_rwStatusClass($registration['last_known_status']); ?>"></span>
+											<span class="rw-led <?php echo $mapLedClass; ?>"></span>
 											<span><?php echo htmlspecialchars((string)$registration['extension'], ENT_QUOTES, 'UTF-8'); ?></span>
 										</div>
 										<div class="rw-map-description"><?php echo htmlspecialchars($registration['description'] ?: '-', ENT_QUOTES, 'UTF-8'); ?></div>
@@ -746,20 +753,56 @@ window.rwUiSettings = {
 			window.RegistrationWatchUpdateMonitoringBanner(rwInitialMonitoringState);
 		}
 
-		function statusClass(status) {
-			switch (String(status || 'Unknown').trim().toLowerCase()) {
-				case 'reachable':
+		function mapVisualState(registration) {
+			const enabled = parseInt(registration.enabled, 10) === 1;
+			const status = String(registration.status || registration.last_known_status || 'Unknown').trim().toLowerCase();
+
+			if (!enabled) {
+				return 'neutral';
+			}
+			if (status === 'reachable') {
+				return 'ok';
+			}
+			if (status === 'unreachable' || status === 'not registered' || status === 'not_registered') {
+				return 'bad';
+			}
+
+			return 'neutral';
+		}
+
+		function mapLedClass(registration) {
+			switch (mapVisualState(registration)) {
+				case 'ok':
 					return 'rw-led-green';
-				case 'registered (no qualify)':
-				case 'registered_no_qualify':
-					return 'rw-led-amber';
-				case 'unreachable':
-				case 'not registered':
-				case 'not_registered':
+				case 'bad':
 					return 'rw-led-red';
-				case 'unknown':
+				case 'neutral':
 				default:
 					return 'rw-led-grey';
+			}
+		}
+
+		function mapTileClass(registration) {
+			switch (mapVisualState(registration)) {
+				case 'ok':
+					return 'rw-map-tile-ok';
+				case 'bad':
+					return 'rw-map-tile-bad';
+				case 'neutral':
+				default:
+					return 'rw-map-tile-neutral';
+			}
+		}
+
+		function mapRowClass(registration) {
+			switch (mapVisualState(registration)) {
+				case 'ok':
+					return 'rw-map-row-ok';
+				case 'bad':
+					return 'rw-map-row-bad';
+				case 'neutral':
+				default:
+					return 'rw-map-row-neutral';
 			}
 		}
 
@@ -994,8 +1037,8 @@ window.rwUiSettings = {
 					const qualifyText = registration.qualify_frequency
 						? escapeHtml(String(registration.qualify_frequency)) + ' s'
 						: textEmpty;
-					html += '<tr>';
-					html += '<td><span class="rw-led ' + statusClass(status) + '"></span> ' + escapeHtml(registration.extension || textUnknown) + '</td>';
+					html += '<tr class="' + mapRowClass(registration) + '">';
+					html += '<td><span class="rw-led ' + mapLedClass(registration) + '"></span> ' + escapeHtml(registration.extension || textUnknown) + '</td>';
 					html += '<td>' + escapeHtml(displayLabel(status)) + '</td>';
 					html += '<td>' + escapeHtml(registration.description || '-') + '</td>';
 					html += '<td>' + deviceIpPort + '</td>';
@@ -1012,8 +1055,8 @@ window.rwUiSettings = {
 				let html = '<div class="rw-registration-map">';
 				for (const registration of visible) {
 					const status = registration.status || registration.last_known_status || 'Unknown';
-					html += '<div class="rw-map-tile">';
-					html += '<div class="rw-map-title"><span class="rw-led ' + statusClass(status) + '"></span><span>' + escapeHtml(registration.extension || textUnknown) + '</span></div>';
+					html += '<div class="rw-map-tile ' + mapTileClass(registration) + '">';
+					html += '<div class="rw-map-title"><span class="rw-led ' + mapLedClass(registration) + '"></span><span>' + escapeHtml(registration.extension || textUnknown) + '</span></div>';
 					html += '<div class="rw-map-description">' + escapeHtml(registration.description || '-') + '</div>';
 					html += '<div class="rw-map-status">' + escapeHtml(displayLabel(status)) + '</div>';
 					for (const row of mapDetailRows(registration, status)) {
