@@ -27,6 +27,8 @@
 			'contact removed': 'Contact removed',
 			reminder: 'Repeat alert',
 			'repeat alert': 'Repeat alert',
+			ip_address_change: 'IP Address Change',
+			'ip address change': 'IP Address Change',
 			storm_summary: 'Storm Summary',
 			'storm summary': 'Storm Summary',
 			storm_suppressed: 'Storm suppressed',

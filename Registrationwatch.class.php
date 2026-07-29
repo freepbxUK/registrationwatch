@@ -4731,6 +4731,9 @@ class Registrationwatch implements \BMO {
 				return 'Contact removed';
 			case 'reminder':
 				return 'Repeat alert';
+			case 'ip_address_change':
+			case 'ip address change':
+				return 'IP Address Change';
 		}
 
 		return $reason !== '' ? $reason : '-';
