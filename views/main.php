@@ -682,16 +682,15 @@ $_rwAssetVer = max(
 		<div class="modal-content">
 			<div class="modal-header">
 				<button type="button" class="close" data-dismiss="modal" aria-label="<?php echo _('Cancel'); ?>"><span aria-hidden="true">&times;</span></button>
-				<h4 class="modal-title" id="rw-reset-extension-modal-title"><?php echo _('Reset registration state from Asterisk?'); ?></h4>
+				<h4 class="modal-title" id="rw-reset-extension-modal-title"><?php echo _('Refresh from Asterisk?'); ?></h4>
 			</div>
 			<div class="modal-body">
-				<p><?php echo _('This will stop all active alerts for this extension and rebuild its registration cards from Asterisk.'); ?></p>
-				<p><?php echo _('Any registrations which Asterisk no longer reports will be removed.'); ?></p>
-				<p><?php echo _('This action is intended for recovery after registration state becomes inconsistent and should not be used routinely.'); ?></p>
+				<p><?php echo _('Registration Watch will refresh this extension using the registration information currently reported by Asterisk.'); ?></p>
+				<p><?php echo _('Monitoring settings, repeat alert mode, history and notes will be preserved where possible.'); ?></p>
 			</div>
 			<div class="modal-footer">
 				<button type="button" class="btn btn-default" data-dismiss="modal"><?php echo _('Cancel'); ?></button>
-				<button type="button" class="btn btn-danger" id="rw-confirm-reset-extension"><?php echo _('Reset and rebuild'); ?></button>
+				<button type="button" class="btn btn-danger" id="rw-confirm-reset-extension"><?php echo _('Confirm'); ?></button>
 			</div>
 		</div>
 	</div>

@@ -955,7 +955,7 @@
 			$('#rw-reset-extension-modal').modal('show');
 		});
 
-		root.on('click', '#rw-confirm-reset-extension', function () {
+		$(document).on('click', '#rw-confirm-reset-extension', function () {
 			var confirmBtn = $(this);
 			var token = registrationWatchToken(root);
 			if (!token) {
