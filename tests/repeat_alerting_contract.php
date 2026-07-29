@@ -210,6 +210,78 @@ function transition_alert_type(string $from, string $to): ?string {
 	return null;
 }
 
+function same_pass_dead_registration_id(PDO $db, string $extension, array $liveContactsByKey): int {
+	$extension = strtolower(trim($extension));
+	if ($extension === '') {
+		return 0;
+	}
+
+	$params = [
+		':extension' => $extension,
+		':placeholder_key' => no_contact_registration_key($extension),
+	];
+	$sql =
+		'SELECT id
+		FROM registrationwatch_registrations
+		WHERE extension = :extension
+			AND discovered = 1
+			AND source_ip IS NOT NULL AND source_ip <> ""
+			AND registration_key <> :placeholder_key';
+
+	$liveKeys = array_keys($liveContactsByKey);
+	if ($liveKeys) {
+		$placeholders = [];
+		foreach ($liveKeys as $idx => $key) {
+			$param = ':live_key_' . $idx;
+			$placeholders[] = $param;
+			$params[$param] = (string)$key;
+		}
+		$sql .= ' AND registration_key NOT IN (' . implode(', ', $placeholders) . ')';
+	}
+
+	$sql .= ' ORDER BY id ASC LIMIT 2';
+	$stmt = $db->prepare($sql);
+	$stmt->execute($params);
+	$ids = $stmt->fetchAll(PDO::FETCH_COLUMN, 0);
+
+	return count($ids) === 1 ? (int)$ids[0] : 0;
+}
+
+function promote_live_contact_same_pass(PDO $db, array $liveContact, array $liveContactsByKey): int {
+	$registrationKey = (string)$liveContact['registration_key'];
+	$extension = strtolower(trim((string)$liveContact['extension']));
+
+	$stmt = $db->prepare('SELECT id FROM registrationwatch_registrations WHERE registration_key = ?');
+	$stmt->execute([$registrationKey]);
+	$id = $stmt->fetchColumn();
+	if ($id) {
+		$db->prepare('UPDATE registrationwatch_registrations SET source_ip = ?, source_port = ?, last_known_status = ? WHERE id = ?')
+			->execute([(string)($liveContact['source_ip'] ?? ''), $liveContact['source_port'] ?? null, (string)($liveContact['status'] ?? 'Unknown'), (int)$id]);
+		return (int)$id;
+	}
+
+	$placeholderStmt = $db->prepare('SELECT id FROM registrationwatch_registrations WHERE registration_key = ? AND (source_ip IS NULL OR source_ip = "") LIMIT 1');
+	$placeholderStmt->execute([no_contact_registration_key($extension)]);
+	$placeholderId = $placeholderStmt->fetchColumn();
+	if ($placeholderId) {
+		$db->prepare('UPDATE registrationwatch_registrations SET registration_key = ?, source_ip = ?, source_port = ?, last_known_status = ? WHERE id = ?')
+			->execute([$registrationKey, (string)($liveContact['source_ip'] ?? ''), $liveContact['source_port'] ?? null, (string)($liveContact['status'] ?? 'Unknown'), (int)$placeholderId]);
+		return (int)$placeholderId;
+	}
+
+	$deadId = same_pass_dead_registration_id($db, $extension, $liveContactsByKey);
+	if ($deadId > 0) {
+		$db->prepare('UPDATE registrationwatch_registrations SET registration_key = ?, source_ip = ?, source_port = ?, last_known_status = ? WHERE id = ?')
+			->execute([$registrationKey, (string)($liveContact['source_ip'] ?? ''), $liveContact['source_port'] ?? null, (string)($liveContact['status'] ?? 'Unknown'), $deadId]);
+		return $deadId;
+	}
+
+	$db->prepare('INSERT INTO registrationwatch_registrations (registration_key, extension, source_ip, source_port, enabled, repeat_mode, last_known_status, discovered) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+		->execute([$registrationKey, $extension, (string)($liveContact['source_ip'] ?? ''), $liveContact['source_port'] ?? null, 0, null, 'Unknown', 1]);
+
+	return (int)$db->lastInsertId();
+}
+
 function handoff_escalation(PDO $db, int $registrationId, string $registrationKey, string $extension, int $historyId, string $alertType, string $createdAt, string $now): void {
 	$stmt = $db->prepare(
 		'SELECT registration_id, registration_key, extension, history_id, alert_type, active_since, last_alert_at, alert_count, next_due_at, repeat_mode
@@ -308,10 +380,12 @@ $db->exec(
 		extension TEXT NOT NULL,
 		contact_uri TEXT,
 		source_ip TEXT,
+		source_port INTEGER,
 		registration_ua_class TEXT NOT NULL DEFAULT "",
 		enabled INTEGER NOT NULL,
 		auto_disabled_absent_at TEXT,
 		repeat_mode TEXT,
+		discovered INTEGER NOT NULL DEFAULT 1,
 		last_known_status TEXT NOT NULL,
 		last_seen_at TEXT
 	)'
@@ -565,6 +639,120 @@ if (count($multiDeadIds) !== 1) {
 }
 assert_true((int)$db->query("SELECT COUNT(*) FROM registrationwatch_registrations WHERE extension = '2009'")->fetchColumn() === 3, 'different-IP return with multiple dead rows should insert a new row rather than guess');
 assert_true((int)$db->query("SELECT COUNT(*) FROM registrationwatch_registrations WHERE extension = '2009' AND last_known_status = 'Not registered'")->fetchColumn() === 2, 'multiple dead rows should remain unmodified when a new unmatched IP appears');
+
+$samePassOldKey = registration_key('2011', '198.51.100.120');
+$samePassNewKey = registration_key('2011', '198.51.100.220');
+$db->prepare('INSERT INTO registrationwatch_registrations (registration_key, extension, source_ip, enabled, repeat_mode, last_known_status, discovered) VALUES (?, ?, ?, ?, ?, ?, ?)')
+	->execute([$samePassOldKey, '2011', '198.51.100.120', 1, 'escalating', 'Reachable', 1]);
+$samePassId = (int)$db->lastInsertId();
+$samePassLive = [
+	$samePassNewKey => [
+		'registration_key' => $samePassNewKey,
+		'extension' => '2011',
+		'source_ip' => '198.51.100.220',
+		'source_port' => 5092,
+		'status' => 'Reachable',
+	],
+];
+$samePassResolvedId = promote_live_contact_same_pass($db, $samePassLive[$samePassNewKey], $samePassLive);
+assert_true($samePassResolvedId === $samePassId, 'same-pass IP change should reuse the existing row id');
+assert_true((int)$db->query("SELECT COUNT(*) FROM registrationwatch_registrations WHERE extension = '2011'")->fetchColumn() === 1, 'same-pass IP change should not insert a second row');
+assert_true((string)$db->query("SELECT registration_key FROM registrationwatch_registrations WHERE id = {$samePassId}")->fetchColumn() === $samePassNewKey, 'same-pass IP change should promote row identity to new key');
+
+$ambigKeyA = registration_key('2012', '198.51.100.130');
+$ambigKeyB = registration_key('2012', '198.51.100.131');
+$ambigNewKey = registration_key('2012', '198.51.100.230');
+$db->prepare('INSERT INTO registrationwatch_registrations (registration_key, extension, source_ip, enabled, repeat_mode, last_known_status, discovered) VALUES (?, ?, ?, ?, ?, ?, ?)')
+	->execute([$ambigKeyA, '2012', '198.51.100.130', 1, null, 'Reachable', 1]);
+$ambigIdA = (int)$db->lastInsertId();
+$db->prepare('INSERT INTO registrationwatch_registrations (registration_key, extension, source_ip, enabled, repeat_mode, last_known_status, discovered) VALUES (?, ?, ?, ?, ?, ?, ?)')
+	->execute([$ambigKeyB, '2012', '198.51.100.131', 1, null, 'Reachable', 1]);
+$ambigIdB = (int)$db->lastInsertId();
+$ambigLive = [
+	$ambigNewKey => [
+		'registration_key' => $ambigNewKey,
+		'extension' => '2012',
+		'source_ip' => '198.51.100.230',
+		'source_port' => 5060,
+		'status' => 'Reachable',
+	],
+];
+$ambigResolvedId = promote_live_contact_same_pass($db, $ambigLive[$ambigNewKey], $ambigLive);
+assert_true($ambigResolvedId !== $ambigIdA && $ambigResolvedId !== $ambigIdB, 'same-pass ambiguity with two candidates should insert instead of guessing');
+assert_true((int)$db->query("SELECT COUNT(*) FROM registrationwatch_registrations WHERE extension = '2012'")->fetchColumn() === 3, 'same-pass ambiguity should keep two old rows and add one new row');
+
+$overlapOldKey = registration_key('2013', '198.51.100.140');
+$overlapNewKey = registration_key('2013', '198.51.100.240');
+$db->prepare('INSERT INTO registrationwatch_registrations (registration_key, extension, source_ip, enabled, repeat_mode, last_known_status, discovered) VALUES (?, ?, ?, ?, ?, ?, ?)')
+	->execute([$overlapOldKey, '2013', '198.51.100.140', 1, null, 'Reachable', 1]);
+$overlapOldId = (int)$db->lastInsertId();
+$overlapLive = [
+	$overlapOldKey => [
+		'registration_key' => $overlapOldKey,
+		'extension' => '2013',
+		'source_ip' => '198.51.100.140',
+		'source_port' => 5060,
+		'status' => 'Reachable',
+	],
+	$overlapNewKey => [
+		'registration_key' => $overlapNewKey,
+		'extension' => '2013',
+		'source_ip' => '198.51.100.240',
+		'source_port' => 5061,
+		'status' => 'Reachable',
+	],
+];
+$overlapExistingId = promote_live_contact_same_pass($db, $overlapLive[$overlapOldKey], $overlapLive);
+$overlapNewId = promote_live_contact_same_pass($db, $overlapLive[$overlapNewKey], $overlapLive);
+assert_true($overlapExistingId === $overlapOldId, 'concurrent overlap should keep existing old contact row');
+assert_true($overlapNewId !== $overlapOldId, 'concurrent overlap should create separate row for new contact');
+assert_true((int)$db->query("SELECT COUNT(*) FROM registrationwatch_registrations WHERE extension = '2013'")->fetchColumn() === 2, 'concurrent old and new contacts should remain separate rows');
+
+$portOnlyKey = registration_key('2014', '198.51.100.150');
+$db->prepare('INSERT INTO registrationwatch_registrations (registration_key, extension, source_ip, source_port, enabled, repeat_mode, last_known_status, discovered) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+	->execute([$portOnlyKey, '2014', '198.51.100.150', 5060, 1, null, 'Reachable', 1]);
+$portOnlyId = (int)$db->lastInsertId();
+$portOnlyLive = [
+	$portOnlyKey => [
+		'registration_key' => $portOnlyKey,
+		'extension' => '2014',
+		'source_ip' => '198.51.100.150',
+		'source_port' => 5099,
+		'status' => 'Reachable',
+	],
+];
+$portOnlyResolved = promote_live_contact_same_pass($db, $portOnlyLive[$portOnlyKey], $portOnlyLive);
+assert_true($portOnlyResolved === $portOnlyId, 'source-port-only change should keep the same row id');
+assert_true((int)$db->query("SELECT COUNT(*) FROM registrationwatch_registrations WHERE extension = '2014'")->fetchColumn() === 1, 'source-port-only change should not create a new row');
+assert_true((int)$db->query("SELECT source_port FROM registrationwatch_registrations WHERE id = {$portOnlyId}")->fetchColumn() === 5099, 'source-port-only change should update stored source_port on same row');
+
+$pathOldKey = registration_key('2015', '198.51.100.160');
+$pathNewKey = registration_key('2015', '198.51.100.260');
+$db->prepare('INSERT INTO registrationwatch_registrations (registration_key, extension, source_ip, enabled, repeat_mode, last_known_status, discovered) VALUES (?, ?, ?, ?, ?, ?, ?)')
+	->execute([$pathOldKey, '2015', '198.51.100.160', 1, 'escalating', 'Not registered', 1]);
+$pathId = (int)$db->lastInsertId();
+$db->prepare(
+	'INSERT INTO registrationwatch_alert_escalation
+		(registration_id, registration_key, extension, history_id, alert_type, active_since, next_due_at, repeat_mode)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+)->execute([$pathId, $pathOldKey, '2015', 501, 'not_registered', '2026-06-15 10:00:00', '2026-06-15 11:00:00', 'escalating']);
+$pathLive = [
+	$pathNewKey => [
+		'registration_key' => $pathNewKey,
+		'extension' => '2015',
+		'source_ip' => '198.51.100.260',
+		'source_port' => 5060,
+		'status' => 'Reachable',
+	],
+];
+$pathResolved = promote_live_contact_same_pass($db, $pathLive[$pathNewKey], $pathLive);
+assert_true($pathResolved === $pathId, 'same-pass reuse should preserve registration id for alert continuity');
+assert_true((int)$db->query("SELECT COUNT(*) FROM registrationwatch_registrations WHERE extension = '2015'")->fetchColumn() === 1, 'same-pass reuse should not leave obsolete sibling row');
+$currentPathKey = (string)$db->query("SELECT registration_key FROM registrationwatch_registrations WHERE id = {$pathId}")->fetchColumn();
+$statusUsingCurrentIdentity = isset($pathLive[$currentPathKey]) ? 'Reachable' : 'Not registered';
+assert_true($statusUsingCurrentIdentity === 'Reachable', 'reused row identity should resolve as reachable, not obsolete not-registered');
+$db->prepare('DELETE FROM registrationwatch_alert_escalation WHERE registration_id = ? AND alert_type = ?')->execute([$pathId, 'not_registered']);
+assert_true((int)$db->query("SELECT COUNT(*) FROM registrationwatch_alert_escalation WHERE registration_id = {$pathId}")->fetchColumn() === 0, 'recovery cleanup should remove not_registered escalation on reused row id');
 
 assert_true(clean_contact_uri('sip:2006@198.51.100.88:5060;ob;x-ast-orig-host=10.0.0.8:5060') === '2006@198.51.100.88:5060', 'map contact display should strip SIP URI parameters');
 $tileTitle = '<div class="rw-map-title"><span class="rw-led rw-led-red"></span><span>' . htmlspecialchars('2006', ENT_QUOTES, 'UTF-8') . '</span></div>';

@@ -271,7 +271,10 @@
 		} else if (isActivelyAlerting(registration)) {
 			monitoredCell = '<div class="rw-alerting-cell">'
 				+ '<small class="rw-alerting-indicator">Actively alerting</small>'
+				+ '<div class="rw-alerting-actions">'
 				+ '<button type="button" class="btn btn-xs btn-warning rw-disable-alerting" data-registration-id="' + id + '" title="Disable alerting for this extension">Disable alerting</button>'
+				+ '<button type="button" class="btn btn-xs btn-default rw-reset-from-asterisk" data-registration-id="' + id + '" title="Reset registration state from Asterisk"><i class="fa fa-refresh"></i> Reset from Asterisk</button>'
+				+ '</div>'
 				+ '</div>';
 		} else {
 			monitoredCell = buildMonitoredCellHtml(parseInt(registration.enabled, 10));
@@ -639,6 +642,7 @@
 		var alertSettingsSavedThisSession = false;
 		var refreshInFlight = false;
 		var refreshTimer = null;
+		var resetTargetRegistrationId = 0;
 
 		function getPollInterval() {
 			return parseInt(root.attr('data-poll-interval'), 10) || 0;
@@ -935,6 +939,75 @@
 			}).fail(function () {
 				showMessage('Unable to disable alerting.', 'error');
 				btn.prop('disabled', false);
+			});
+		});
+
+		root.on('click', '.rw-reset-from-asterisk', function () {
+			var btn = $(this);
+			var row = btn.closest('tr');
+			var registrationId = parseInt(btn.data('registration-id') || row.data('registration-id'), 10) || 0;
+			if (registrationId <= 0) {
+				showMessage('Unable to determine extension reset target.', 'error');
+				return;
+			}
+
+			resetTargetRegistrationId = registrationId;
+			$('#rw-reset-extension-modal').modal('show');
+		});
+
+		root.on('click', '#rw-confirm-reset-extension', function () {
+			var confirmBtn = $(this);
+			var token = registrationWatchToken(root);
+			if (!token) {
+				showMessage('Security token unavailable. Please reload the page and try again.', 'error');
+				return;
+			}
+			if (resetTargetRegistrationId <= 0) {
+				showMessage('No extension reset target selected.', 'error');
+				return;
+			}
+			if (confirmBtn.data('registrationwatch-reset-in-flight')) {
+				return;
+			}
+
+			confirmBtn.data('registrationwatch-reset-in-flight', true).prop('disabled', true);
+			$.ajax({
+				url: 'ajax.php?module=registrationwatch',
+				method: 'POST',
+				dataType: 'json',
+				data: {
+					command: 'resetextensionfromasterisk',
+					registration_id: resetTargetRegistrationId,
+					token: token
+				}
+			}).done(function (response) {
+				if (!response || !response.status) {
+					showMessage(response && response.message ? response.message : 'Unable to reset registration state from Asterisk.', 'error');
+					return;
+				}
+
+				$('#rw-reset-extension-modal').modal('hide');
+				resetTargetRegistrationId = 0;
+				renderWatchedExtensionsTable(response.watchedExtensions !== undefined ? response.watchedExtensions : response.registrations);
+				renderStatusRows(response.registrations);
+				if (window.RegistrationWatchRenderRegistrationMap) {
+					window.RegistrationWatchRenderRegistrationMap(response.registrations);
+				}
+				if (response.statusHistory) {
+					renderHistoryRows(response.statusHistory);
+				}
+				if (response.alertHistory) {
+					renderAlertHistoryRows(response.alertHistory);
+				}
+				updateTimeDiagnostics(response.timeDiagnostics);
+				if (response.monitoringState) {
+					updateMonitoringBanner(response.monitoringState);
+				}
+				showMessage(response.message || 'Registration state reset from Asterisk.', 'success');
+			}).fail(function () {
+				showMessage('Unable to reset registration state from Asterisk.', 'error');
+			}).always(function () {
+				confirmBtn.removeData('registrationwatch-reset-in-flight').prop('disabled', false);
 			});
 		});
 

@@ -453,6 +453,13 @@ body:has(.registrationwatch) #page_body {
         gap: 3px;
 }
 
+.registrationwatch .rw-alerting-actions {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px;
+	align-items: center;
+}
+
 .registrationwatch .rw-alerting-indicator {
         margin-left: 8px;
         color: #c9302c;
@@ -467,6 +474,12 @@ body:has(.registrationwatch) #page_body {
         background-color: #c9302c !important;
         border-color: #ac2925 !important;
         color: #fff !important;
+}
+
+.registrationwatch .rw-reset-from-asterisk {
+	line-height: 1.2;
+	padding: 2px 8px;
+	font-size: 11px;
 }
 
 .registrationwatch .rw-global-snoozed-label {

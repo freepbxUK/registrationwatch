@@ -1,4 +1,4 @@
-# Registration Watch 1.3.0 for FreePBX 16 and 17
+# Registration Watch 1.3.1 for FreePBX 16 and 17
 
 Registration Watch (`registrationwatch`) watches PJSIP registration state in
 FreePBX/PBXact 16 and 17. It discovers configured FreePBX PJSIP devices and tracks
@@ -16,10 +16,7 @@ device or system.
 
 ## Release Status
 
-Registration Watch 1.3.0 is the current release for FreePBX 16 and 17. Version
-1.2.0 was the first release that reflected the settled direction of the module;
-earlier versions were pilot releases used to prove the original idea and alert
-behaviour.
+Registration Watch 1.3.1 is the current release for FreePBX 16 and 17.
 
 Use the `main` branch for stable releases. Development and release-candidate
 branches may contain incomplete or test-only changes.
@@ -292,10 +289,9 @@ auto-disabled to stop stale entries from alerting indefinitely. They remain
 visible in the Watched Extensions table. If the same registration returns, it is
 re-enabled automatically.
 
-Email sending uses FreePBX/CodeIgniter mail support. Registration Watch does not
-use raw PHP `mail()` fallback. A successful local mailer handoff means the
-message was accepted by the PBX mailer, not that final external delivery is
-guaranteed.
+Alert delivery depends on FreePBX/PBXact mail configuration. A successful send
+result means the message was accepted by the PBX mailer, not that final external
+delivery is guaranteed.
 
 ## Push Mobile Softphones
 
@@ -415,6 +411,31 @@ This module has been developed with AI assistance for code generation, review, t
 @kierknoby, Kieran Knowles-Byrne // FreePBX UK
 
 ## Release History
+
+### 1.3.1, patch release, 29 July 2026
+
+Released by `@kierknoby, Kieran Knowles-Byrne // FreePBX UK`.
+
+This patch release focuses on registration-state continuity and recovery for
+extensions whose contact identity changes.
+
+#### Registration continuity
+
+* Preserves watched registration identity when a monitored endpoint changes network identity.
+* Prevents obsolete registrations from continuing to generate repeat alerts after a successful replacement.
+* Reuses the existing watched registration where continuity can be determined unambiguously.
+* Preserves genuine simultaneous multi-contact registrations by refusing to guess when multiple candidates exist.
+
+#### Reset from Asterisk maintenance action
+
+* Adds a per-extension **Reset from Asterisk** action beside Active Alerting in Watched Extensions.
+* Requires confirmation before changing state and explains intended recovery-only usage.
+* Acquires the existing reconcile lock before running so it does not race normal reconciliation.
+* Stops active escalation state for the selected extension.
+* Rebuilds current registration rows for the selected extension from live Asterisk contact data only.
+* Removes stale current registration rows that Asterisk no longer reports for that extension.
+* Preserves extension-level monitoring configuration, repeat alert mode, and administrator notes where they can be safely retained.
+* Preserves Status History and Alert History audit tables.
 
 ### 1.3.0, minor release, 29 July 2026
 

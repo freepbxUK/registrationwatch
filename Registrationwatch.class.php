@@ -13,7 +13,7 @@ namespace FreePBX\modules;
 class Registrationwatch implements \BMO {
 
 	/** Fallback only. Authoritative version lives in module.xml. */
-	const VERSION = '1.3.0';
+	const VERSION = '1.3.1';
 
 	const STATUS_REACHABLE = 'Reachable';
 	const STATUS_UNREACHABLE = 'Unreachable';
@@ -271,6 +271,7 @@ class Registrationwatch implements \BMO {
 			case 'saveprunepolicy':
 			case 'deletestatushistoryrow':
 			case 'deletealerthistoryrow':
+			case 'resetextensionfromasterisk':
 			case 'snoozemonitoring':
 			case 'resumemonitoring':
 				return true;
@@ -317,6 +318,8 @@ class Registrationwatch implements \BMO {
 				return $this->handleDeleteStatusHistoryRow();
 			case 'deletealerthistoryrow':
 				return $this->handleDeleteAlertHistoryRow();
+			case 'resetextensionfromasterisk':
+				return $this->handleResetExtensionFromAsterisk();
 			case 'snoozemonitoring':
 				return $this->handleSnoozeMonitoring();
 			case 'resumemonitoring':
@@ -378,6 +381,226 @@ class Registrationwatch implements \BMO {
 			'registration_id' => $registrationId,
 			'enabled' => $enabled,
 			'monitoringState' => $this->getMonitoringState(),
+		];
+	}
+
+	private function handleResetExtensionFromAsterisk(): array {
+		$registrationId = $this->positiveRequestId('registration_id');
+		if ($registrationId <= 0) {
+			return ['status' => false, 'message' => _('Missing watched registration.')];
+		}
+
+		$db = $this->db();
+		$extStmt = $db->prepare('SELECT extension FROM registrationwatch_registrations WHERE id = :id');
+		$extStmt->execute([':id' => $registrationId]);
+		$extension = $this->normaliseRegistrationExtension((string)($extStmt->fetchColumn() ?? ''));
+		if ($extension === '') {
+			return ['status' => false, 'message' => _('Missing watched registration.')];
+		}
+
+		if (!$this->acquireReconcileLock()) {
+			return ['status' => false, 'message' => _('Reset is unavailable because another registration reconcile is running. Try again in a moment.')];
+		}
+
+		try {
+			$settings = $this->extensionResetSnapshot($extension);
+			if (!$settings['ok']) {
+				return ['status' => false, 'message' => $settings['message']];
+			}
+
+			$allowedDevices = $this->getAllowedPjsipDeviceIds();
+			if (!isset($allowedDevices[$extension])) {
+				return ['status' => false, 'message' => _('This extension is no longer a configured PJSIP device, so it cannot be rebuilt from Asterisk contacts.')];
+			}
+
+			$db->beginTransaction();
+			try {
+				$now = $this->now();
+				$liveContacts = $this->getLiveContacts($allowedDevices);
+				$descriptions = $this->getRegistrationDescriptions();
+				$description = $descriptions[$extension] ?? '';
+
+				$clearEscalations = $db->prepare(
+					'DELETE FROM registrationwatch_alert_escalation
+					WHERE registration_id IN (
+						SELECT id FROM registrationwatch_registrations WHERE extension = :extension
+					)'
+				);
+				$clearEscalations->execute([':extension' => $extension]);
+
+				$deleteRows = $db->prepare('DELETE FROM registrationwatch_registrations WHERE extension = :extension');
+				$deleteRows->execute([':extension' => $extension]);
+
+				$extensionContacts = [];
+				foreach ($liveContacts as $contact) {
+					if ($this->normaliseRegistrationExtension((string)($contact['extension'] ?? '')) !== $extension) {
+						continue;
+					}
+					$extensionContacts[] = $contact;
+				}
+
+				if ($extensionContacts) {
+					$insert = $db->prepare(
+						'INSERT INTO registrationwatch_registrations
+							(registration_key, extension, description, notes, notes_updated_at, enabled, auto_disabled_absent_at, repeat_mode,
+								discovered, last_known_status, contact_uri, source_ip, source_port, registration_ua_class,
+								transport, user_agent, device_name, firmware_version, contact_count,
+								contact_expires_at, qualify_frequency, latency_ms, last_seen_at, last_checked_at,
+								created_at, updated_at, first_discovered_at, last_discovered_at)
+						VALUES
+							(:registration_key, :extension, :description, :notes, :notes_updated_at, :enabled, NULL, :repeat_mode,
+								1, :last_known_status, :contact_uri, :source_ip, :source_port, :registration_ua_class,
+								:transport, :user_agent, :device_name, :firmware_version, :contact_count,
+								:contact_expires_at, :qualify_frequency, :latency_ms, :last_seen_at, :last_checked_at,
+								:created_at, :updated_at, :first_discovered_at, :last_discovered_at)'
+					);
+
+					foreach ($extensionContacts as $contact) {
+						$contactUri = (string)($contact['contact_uri'] ?? '');
+						$lastSeenAt = $contactUri !== '' ? $now : null;
+						$insert->execute([
+							':registration_key' => (string)$contact['registration_key'],
+							':extension' => $extension,
+							':description' => $description,
+							':notes' => $settings['notes'],
+							':notes_updated_at' => $settings['notes_updated_at'],
+							':enabled' => $settings['enabled'],
+							':repeat_mode' => $settings['repeat_mode'],
+							':last_known_status' => $this->normaliseState($contact['status'] ?? self::STATUS_UNKNOWN),
+							':contact_uri' => $contactUri !== '' ? $contactUri : null,
+							':source_ip' => $contact['source_ip'] ?? null,
+							':source_port' => $contact['source_port'] ?? null,
+							':registration_ua_class' => $contact['registration_ua_class'] ?? '',
+							':transport' => $contact['transport'] ?? null,
+							':user_agent' => $contact['user_agent'] ?? null,
+							':device_name' => $contact['device_name'] ?? null,
+							':firmware_version' => $contact['firmware_version'] ?? null,
+							':contact_count' => max(1, (int)($contact['contact_count'] ?? 1)),
+							':contact_expires_at' => $contact['contact_expires_at'] ?? null,
+							':qualify_frequency' => $contact['qualify_frequency'] ?? null,
+							':latency_ms' => $contact['latency_ms'] ?? null,
+							':last_seen_at' => $lastSeenAt,
+							':last_checked_at' => $now,
+							':created_at' => $now,
+							':updated_at' => $now,
+							':first_discovered_at' => $now,
+							':last_discovered_at' => $now,
+						]);
+					}
+				} else {
+					$insert = $db->prepare(
+						'INSERT INTO registrationwatch_registrations
+							(registration_key, extension, description, notes, notes_updated_at, enabled, auto_disabled_absent_at, repeat_mode,
+								discovered, last_known_status, contact_count, last_checked_at,
+								created_at, updated_at, first_discovered_at, last_discovered_at)
+						VALUES
+							(:registration_key, :extension, :description, :notes, :notes_updated_at, :enabled, NULL, :repeat_mode,
+								1, :last_known_status, 1, :last_checked_at,
+								:created_at, :updated_at, :first_discovered_at, :last_discovered_at)'
+					);
+					$insert->execute([
+						':registration_key' => $this->noContactRegistrationKey($extension),
+						':extension' => $extension,
+						':description' => $description,
+						':notes' => $settings['notes'],
+						':notes_updated_at' => $settings['notes_updated_at'],
+						':enabled' => $settings['enabled'],
+						':repeat_mode' => $settings['repeat_mode'],
+						':last_known_status' => self::STATUS_NOT_REGISTERED,
+						':last_checked_at' => $now,
+						':created_at' => $now,
+						':updated_at' => $now,
+						':first_discovered_at' => $now,
+						':last_discovered_at' => $now,
+					]);
+				}
+
+				$db->commit();
+			} catch (\Throwable $e) {
+				if ($db->inTransaction()) {
+					$db->rollBack();
+				}
+				throw $e;
+			}
+
+			return [
+				'status' => true,
+				'message' => _('Registration state reset from Asterisk.'),
+				'registrations' => $this->getRegistrationMapRows(),
+				'watchedExtensions' => $this->getWatchedExtensionGroups(),
+				'statusHistory' => $this->getStatusHistory(),
+				'alertHistory' => $this->getAlertHistory(),
+				'timeDiagnostics' => $this->getTimeDiagnostics(),
+				'monitoringState' => $this->getMonitoringState(),
+			];
+		} catch (\Throwable $e) {
+			$this->logError('Extension reset from Asterisk failed: ' . $e->getMessage());
+			return ['status' => false, 'message' => _('Unable to reset from Asterisk. No changes were applied.')];
+		} finally {
+			$this->releaseReconcileLock();
+		}
+	}
+
+	private function extensionResetSnapshot(string $extension): array {
+		$stmt = $this->db()->prepare(
+			'SELECT id, notes, notes_updated_at, enabled, repeat_mode
+			FROM registrationwatch_registrations
+			WHERE extension = :extension
+			ORDER BY id ASC'
+		);
+		$stmt->execute([':extension' => $extension]);
+		$rows = $stmt->fetchAll(\PDO::FETCH_ASSOC);
+
+		if (!$rows) {
+			return [
+				'ok' => false,
+				'message' => _('No stored registrations were found for this extension.'),
+			];
+		}
+
+		$normalise = function ($value): string {
+			return trim((string)$value);
+		};
+
+		$noteValues = [];
+		$noteTimestamps = [];
+		foreach ($rows as $row) {
+			$noteValues[$normalise($row['notes'] ?? '')] = true;
+			$noteTimestamps[$normalise($row['notes_updated_at'] ?? '')] = true;
+		}
+
+		if (count($noteValues) > 1 || count($noteTimestamps) > 1) {
+			return [
+				'ok' => false,
+				'message' => _('Reset cancelled because notes differ across registrations for this extension. Normalise notes first so configuration is not lost.'),
+			];
+		}
+
+		$enabled = 0;
+		$repeatMode = null;
+		$notes = (string)($rows[0]['notes'] ?? '');
+		$notesUpdatedAt = $normalise($rows[0]['notes_updated_at'] ?? '') !== ''
+			? (string)$rows[0]['notes_updated_at']
+			: null;
+
+		foreach ($rows as $row) {
+			if ((int)($row['enabled'] ?? 0) === 1) {
+				$enabled = 1;
+			}
+			$currentRepeat = isset($row['repeat_mode']) && trim((string)$row['repeat_mode']) !== ''
+				? $this->normaliseRepeatMode((string)$row['repeat_mode'])
+				: null;
+			if ($currentRepeat !== null) {
+				$repeatMode = $currentRepeat;
+			}
+		}
+
+		return [
+			'ok' => true,
+			'enabled' => $enabled,
+			'repeat_mode' => $repeatMode,
+			'notes' => $notes,
+			'notes_updated_at' => $notesUpdatedAt,
 		];
 	}
 
@@ -854,6 +1077,7 @@ class Registrationwatch implements \BMO {
 		$now = $this->now();
 		$allowedDevices = $allowedDevices === null ? $this->getAllowedPjsipDeviceIds() : $allowedDevices;
 		$liveContacts = $liveContacts === null ? $this->getLiveContacts($allowedDevices) : $liveContacts;
+		$liveContactKeys = array_fill_keys(array_keys($liveContacts), true);
 		$descriptions = $this->getRegistrationDescriptions();
 		$liveExtensions = [];
 		$db = $this->db();
@@ -952,7 +1176,7 @@ class Registrationwatch implements \BMO {
 				continue;
 			}
 
-			$deadRegistrationId = $this->singleDeadRegistrationId($extension);
+			$deadRegistrationId = $this->singleDeadRegistrationId($extension, $liveContactKeys);
 			if ($deadRegistrationId > 0) {
 				$update = $db->prepare(
 					'UPDATE registrationwatch_registrations
@@ -1101,19 +1325,58 @@ class Registrationwatch implements \BMO {
 		return $id ? (int)$id : 0;
 	}
 
-	private function singleDeadRegistrationId(string $extension): int {
-		$stmt = $this->db()->prepare(
+	private function singleDeadRegistrationId(string $extension, ?array $liveContactKeys = null): int {
+		$normalisedExtension = $this->normaliseRegistrationExtension($extension);
+		if ($normalisedExtension === '') {
+			return 0;
+		}
+
+		if ($liveContactKeys === null) {
+			$stmt = $this->db()->prepare(
+				'SELECT id
+				FROM registrationwatch_registrations
+				WHERE extension = :extension
+					AND last_known_status = :status
+				ORDER BY id ASC
+				LIMIT 2'
+			);
+			$stmt->execute([
+				':extension' => $normalisedExtension,
+				':status' => self::STATUS_NOT_REGISTERED,
+			]);
+			$ids = $stmt->fetchAll(\PDO::FETCH_COLUMN, 0);
+
+			return count($ids) === 1 ? (int)$ids[0] : 0;
+		}
+
+		$placeholderKey = $this->noContactRegistrationKey($normalisedExtension);
+		$params = [
+			':extension' => $normalisedExtension,
+			':placeholder_key' => $placeholderKey,
+		];
+		$sql =
 			'SELECT id
 			FROM registrationwatch_registrations
 			WHERE extension = :extension
-				AND last_known_status = :status
-			ORDER BY id ASC
-			LIMIT 2'
-		);
-		$stmt->execute([
-			':extension' => $this->normaliseRegistrationExtension($extension),
-			':status' => self::STATUS_NOT_REGISTERED,
-		]);
+				AND discovered = 1
+				AND source_ip IS NOT NULL AND source_ip <> ""
+				AND registration_key <> :placeholder_key';
+
+		if ($liveContactKeys) {
+			$placeholders = [];
+			$index = 0;
+			foreach (array_keys($liveContactKeys) as $liveKey) {
+				$key = ':live_key_' . $index;
+				$placeholders[] = $key;
+				$params[$key] = (string)$liveKey;
+				$index++;
+			}
+			$sql .= ' AND registration_key NOT IN (' . implode(', ', $placeholders) . ')';
+		}
+
+		$sql .= ' ORDER BY id ASC LIMIT 2';
+		$stmt = $this->db()->prepare($sql);
+		$stmt->execute($params);
 		$ids = $stmt->fetchAll(\PDO::FETCH_COLUMN, 0);
 
 		return count($ids) === 1 ? (int)$ids[0] : 0;

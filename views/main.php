@@ -462,11 +462,18 @@ $_rwAssetVer = max(
 												<?php elseif ($_rwIsActivelyAlerting($registration)): ?>
 													<div class="rw-alerting-cell">
 														<small class="rw-alerting-indicator"><?php echo _('Actively alerting'); ?></small>
-														<button type="button" class="btn btn-xs btn-warning rw-disable-alerting"
-																data-registration-id="<?php echo (int)($registration['id'] ?? $registration['registration_id'] ?? 0); ?>"
-																title="<?php echo _('Disable alerting for this extension'); ?>">
-															<?php echo _('Disable alerting'); ?>
-														</button>
+														<div class="rw-alerting-actions">
+															<button type="button" class="btn btn-xs btn-warning rw-disable-alerting"
+																	data-registration-id="<?php echo (int)($registration['id'] ?? $registration['registration_id'] ?? 0); ?>"
+																	title="<?php echo _('Disable alerting for this extension'); ?>">
+																<?php echo _('Disable alerting'); ?>
+															</button>
+															<button type="button" class="btn btn-xs btn-default rw-reset-from-asterisk"
+																	data-registration-id="<?php echo (int)($registration['id'] ?? $registration['registration_id'] ?? 0); ?>"
+																	title="<?php echo _('Reset registration state from Asterisk'); ?>">
+																<i class="fa fa-refresh"></i> <?php echo _('Reset from Asterisk'); ?>
+															</button>
+														</div>
 													</div>
 												<?php elseif (!empty($registration['enabled'])): ?>
 													<label class="rw-toggle">
@@ -665,6 +672,26 @@ $_rwAssetVer = max(
 						</table>
 					</div>
 				</div>
+			</div>
+		</div>
+	</div>
+</div>
+
+<div class="modal fade" id="rw-reset-extension-modal" tabindex="-1" role="dialog" aria-labelledby="rw-reset-extension-modal-title" aria-hidden="true">
+	<div class="modal-dialog" role="document">
+		<div class="modal-content">
+			<div class="modal-header">
+				<button type="button" class="close" data-dismiss="modal" aria-label="<?php echo _('Cancel'); ?>"><span aria-hidden="true">&times;</span></button>
+				<h4 class="modal-title" id="rw-reset-extension-modal-title"><?php echo _('Reset registration state from Asterisk?'); ?></h4>
+			</div>
+			<div class="modal-body">
+				<p><?php echo _('This will stop all active alerts for this extension and rebuild its registration cards from Asterisk.'); ?></p>
+				<p><?php echo _('Any registrations which Asterisk no longer reports will be removed.'); ?></p>
+				<p><?php echo _('This action is intended for recovery after registration state becomes inconsistent and should not be used routinely.'); ?></p>
+			</div>
+			<div class="modal-footer">
+				<button type="button" class="btn btn-default" data-dismiss="modal"><?php echo _('Cancel'); ?></button>
+				<button type="button" class="btn btn-danger" id="rw-confirm-reset-extension"><?php echo _('Reset and rebuild'); ?></button>
 			</div>
 		</div>
 	</div>
