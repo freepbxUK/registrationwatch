@@ -470,8 +470,8 @@ $_rwAssetVer = max(
 															</button>
 															<button type="button" class="btn btn-xs btn-default rw-reset-from-asterisk"
 																	data-registration-id="<?php echo (int)($registration['id'] ?? $registration['registration_id'] ?? 0); ?>"
-																	title="<?php echo _('Reset registration state from Asterisk'); ?>">
-																<i class="fa fa-refresh"></i> <?php echo _('Reset from Asterisk'); ?>
+																	title="<?php echo _('Refresh from Asterisk'); ?>">
+																	<i class="fa fa-refresh"></i>
 															</button>
 														</div>
 													</div>

@@ -273,7 +273,7 @@
 				+ '<small class="rw-alerting-indicator">Actively alerting</small>'
 				+ '<div class="rw-alerting-actions">'
 				+ '<button type="button" class="btn btn-xs btn-warning rw-disable-alerting" data-registration-id="' + id + '" title="Disable alerting for this extension">Disable alerting</button>'
-				+ '<button type="button" class="btn btn-xs btn-default rw-reset-from-asterisk" data-registration-id="' + id + '" title="Reset registration state from Asterisk"><i class="fa fa-refresh"></i> Reset from Asterisk</button>'
+				+ '<button type="button" class="btn btn-xs btn-default rw-reset-from-asterisk" data-registration-id="' + id + '" title="Refresh from Asterisk"><i class="fa fa-refresh"></i></button>'
 				+ '</div>'
 				+ '</div>';
 		} else {
