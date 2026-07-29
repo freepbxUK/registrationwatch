@@ -44,118 +44,6 @@ function clean_contact_uri(string $value): string {
 	return $value !== '' ? $value : '-';
 }
 
-function parse_contact_uri_address_contract(?string $contactUri): array {
-	$result = ['host' => null, 'port' => null];
-	$contactUri = trim((string)$contactUri);
-	if ($contactUri === '' || preg_match('/\s/', $contactUri)) {
-		return $result;
-	}
-	$contactUri = trim($contactUri, '<>');
-	$atPosition = strrpos($contactUri, '@');
-	$hostPort = $atPosition === false ? $contactUri : substr($contactUri, $atPosition + 1);
-	$hostPort = preg_split('/[;?\#>\s]/', $hostPort, 2)[0] ?? '';
-	$hostPort = trim($hostPort);
-	if ($hostPort === '') {
-		return $result;
-	}
-	if (strpos($hostPort, ':') !== false && stripos($hostPort, 'sip:') === 0) {
-		$hostPort = substr($hostPort, strpos($hostPort, ':') + 1);
-	}
-
-	$host = null;
-	$port = null;
-	if (preg_match('/^\[([^\]]+)\](?::([0-9]+))?$/', $hostPort, $matches)) {
-		$host = trim($matches[1]);
-		$port = $matches[2] ?? null;
-	} elseif (substr_count($hostPort, ':') === 1 && preg_match('/^([^:]+):([0-9]+)$/', $hostPort, $matches)) {
-		$host = trim($matches[1]);
-		$port = $matches[2];
-	} elseif (substr_count($hostPort, ':') === 0) {
-		$host = $hostPort;
-	}
-
-	$host = trim((string)$host, " \t\n\r\0\x0B[]");
-	if ($host === '' || (!filter_var($host, FILTER_VALIDATE_IP) && !preg_match('/^[A-Za-z0-9.-]+$/', $host))) {
-		return $result;
-	}
-
-	$result['host'] = $host;
-	if ($port !== null && ctype_digit((string)$port)) {
-		$portNumber = (int)$port;
-		if ($portNumber > 0 && $portNumber <= 65535) {
-			$result['port'] = $portNumber;
-		}
-	}
-
-	return $result;
-}
-
-function parse_contact_uri_original_host_address_contract(?string $contactUri): array {
-	$result = ['host' => null, 'port' => null];
-	$contactUri = trim((string)$contactUri);
-	if ($contactUri === '' || preg_match('/\s/', $contactUri)) {
-		return $result;
-	}
-	if (!preg_match('/[;?&]x-ast-orig-host=([^;?&#>\s]+)/', $contactUri, $matches)) {
-		return $result;
-	}
-	$value = rawurldecode($matches[1]);
-	if (preg_match('/^\[([^\]]+)\](?::([0-9]+))?$/', $value, $parts)) {
-		$result['host'] = trim($parts[1]);
-		$result['port'] = isset($parts[2]) && ctype_digit((string)$parts[2]) ? (int)$parts[2] : null;
-		return $result;
-	}
-	if (substr_count($value, ':') === 1 && preg_match('/^([^:]+):([0-9]+)$/', $value, $parts)) {
-		$result['host'] = trim($parts[1]);
-		$result['port'] = (int)$parts[2];
-	}
-	return $result;
-}
-
-function registration_address_details_contract(?string $contactUri, ?string $sourceIp, $sourcePort): array {
-	$contactAddress = parse_contact_uri_address_contract($contactUri);
-	$originalAddress = parse_contact_uri_original_host_address_contract($contactUri);
-	$hasOriginalAddress = $originalAddress['host'] !== null || $originalAddress['port'] !== null;
-
-	$deviceAddress = $hasOriginalAddress ? $originalAddress : $contactAddress;
-	$networkAddress = $hasOriginalAddress ? $contactAddress : ['host' => null, 'port' => null];
-
-	$sourceIpNorm = strtolower(trim((string)$sourceIp));
-	$sourcePortNumber = is_numeric((string)$sourcePort) ? (int)$sourcePort : null;
-	if (!$hasOriginalAddress
-		&& $sourcePortNumber !== null
-		&& $sourcePortNumber > 0
-		&& $sourcePortNumber <= 65535
-		&& ($contactAddress['port'] ?? null) !== null
-		&& $sourceIpNorm !== ''
-		&& strtolower(trim((string)($contactAddress['host'] ?? ''))) === $sourceIpNorm
-	) {
-		$parsedPortText = (string)((int)$contactAddress['port']);
-		$sourcePortText = (string)$sourcePortNumber;
-		if ((int)$contactAddress['port'] !== $sourcePortNumber
-			&& strlen($sourcePortText) > strlen($parsedPortText)
-			&& strpos($sourcePortText, $parsedPortText) === 0
-		) {
-			$deviceAddress['port'] = $sourcePortNumber;
-			$networkAddress['port'] = $sourcePortNumber;
-		}
-	}
-
-	if ($networkAddress['host'] === null && trim((string)$sourceIp) !== '') {
-		$networkAddress['host'] = $sourceIp;
-	}
-	if ($networkAddress['port'] === null && trim((string)$sourcePort) !== '' && is_numeric((string)$sourcePort)) {
-		$networkAddress['port'] = (int)$sourcePort;
-	}
-
-	return [
-		'device_ip' => $deviceAddress['host'],
-		'device_port' => $deviceAddress['port'],
-		'network_ip' => $networkAddress['host'],
-		'network_port' => $networkAddress['port'],
-	];
-}
-
 function parse_user_agent_details_contract(?string $userAgent): array {
 	$userAgent = trim((string)$userAgent);
 	if ($userAgent === '') {
@@ -241,6 +129,68 @@ $slashParsed = parse_user_agent_details_contract('DeskPhone/1.2.3');
 assert_true($slashParsed['device_name'] === 'DeskPhone' && $slashParsed['firmware_version'] === '1.2.3', 'slash user-agent parsing should remain unchanged');
 
 function enrich_for_identity_contract(array $contact, array $registrarDetails): array {
+	$parsePort = static function ($value): ?int {
+		if ($value === null || $value === '' || !is_numeric($value)) {
+			return null;
+		}
+		$port = (int)$value;
+		return ($port > 0 && $port <= 65535) ? $port : null;
+	};
+	$parseUriAddress = static function (?string $contactUri) use ($parsePort): array {
+		$result = ['host' => null, 'port' => null];
+		$contactUri = trim((string)$contactUri);
+		if ($contactUri === '' || preg_match('/\s/', $contactUri)) {
+			return $result;
+		}
+		$contactUri = trim($contactUri, '<>');
+		$atPosition = strrpos($contactUri, '@');
+		$hostPort = $atPosition === false ? $contactUri : substr($contactUri, $atPosition + 1);
+		$hostPort = preg_split('/[;?\#>\s]/', $hostPort, 2)[0] ?? '';
+		if ($hostPort === '' || strpos($hostPort, ':') === false) {
+			return $result;
+		}
+		if (!preg_match('/^([^:]+):([0-9]+)$/', $hostPort, $matches)) {
+			return $result;
+		}
+		$result['host'] = strtolower(trim($matches[1]));
+		$result['port'] = $parsePort($matches[2]);
+		return $result;
+	};
+	$shouldPromote = static function (?string $parsedUri, ?string $registrarUri, ?string $parsedIp, ?string $registrarIp) use ($parseUriAddress, $parsePort): bool {
+		$parsed = $parseUriAddress($parsedUri);
+		$registrar = $parseUriAddress($registrarUri);
+		if (($parsed['host'] ?? null) === null || ($registrar['host'] ?? null) === null || $parsed['host'] !== $registrar['host']) {
+			return false;
+		}
+		$parsedPort = $parsePort($parsed['port'] ?? null);
+		$registrarPort = $parsePort($registrar['port'] ?? null);
+		if ($parsedPort === null || $registrarPort === null || $parsedPort === $registrarPort) {
+			return false;
+		}
+		if (strtolower(trim((string)$parsedIp)) !== strtolower(trim((string)$registrarIp))) {
+			return false;
+		}
+		return strlen((string)$registrarPort) > strlen((string)$parsedPort)
+			&& strpos((string)$registrarPort, (string)$parsedPort) === 0;
+	};
+	$applyPorts = static function (array $contactRow, array $detail) use ($parsePort, $parseUriAddress): array {
+		$detailSourcePort = $parsePort($detail['source_port'] ?? null);
+		$detailUriPort = $parsePort(($parseUriAddress((string)($detail['contact_uri'] ?? ''))['port'] ?? null));
+		$resolvedPort = $detailSourcePort;
+		if ($resolvedPort === null) {
+			$resolvedPort = $detailUriPort;
+		} elseif ($detailUriPort !== null && $detailUriPort !== $resolvedPort
+			&& strlen((string)$detailUriPort) > strlen((string)$resolvedPort)
+			&& strpos((string)$detailUriPort, (string)$resolvedPort) === 0
+		) {
+			$resolvedPort = $detailUriPort;
+		}
+		if ($resolvedPort !== null) {
+			$contactRow['source_port'] = $resolvedPort;
+		}
+		return $contactRow;
+	};
+
 	$exact = null;
 	$fallback = [];
 	foreach ($registrarDetails as $detail) {
@@ -257,13 +207,26 @@ function enrich_for_identity_contract(array $contact, array $registrarDetails): 
 	}
 
 	if (is_array($exact)) {
+		if (($exact['contact_uri'] ?? '') !== '') {
+			$contact['contact_uri'] = (string)$exact['contact_uri'];
+		}
 		$contact['source_ip'] = $exact['source_ip'] ?: $contact['source_ip'];
 		$contact['user_agent'] = $exact['user_agent'] ?? $contact['user_agent'];
-		return $contact;
+		return $applyPorts($contact, $exact);
+	}
+
+	if (count($fallback) === 1 && $shouldPromote(
+		$contact['contact_uri'] ?? null,
+		$fallback[0]['contact_uri'] ?? null,
+		$contact['source_ip'] ?? null,
+		$fallback[0]['source_ip'] ?? null
+	)) {
+		$contact['contact_uri'] = (string)($fallback[0]['contact_uri'] ?? $contact['contact_uri']);
 	}
 
 	foreach ($fallback as $detail) {
 		$contact['contact_expires_at'] = $detail['contact_expires_at'] ?? ($contact['contact_expires_at'] ?? null);
+		$contact = $applyPorts($contact, $detail);
 	}
 
 	return $contact;
@@ -907,11 +870,26 @@ $natResolved = resolve_identity_group([$natContact]);
 assert_true($natResolved[0]['source_ip'] === '198.51.100.44', 'exact registrar via_addr should replace parsed contact host before identity');
 assert_true($natResolved[0]['registration_key'] === registration_key('2003', '198.51.100.44'), 'NAT registration should key on authoritative via_addr');
 
-$truncatedPortAddress = registration_address_details_contract('sip:01443886446@150.228.103.201:65;ob', '150.228.103.201', 65019);
-assert_true((int)$truncatedPortAddress['device_port'] === 65019, 'truncated parsed contact port should prefer authoritative source_port for device port display');
-assert_true((int)$truncatedPortAddress['network_port'] === 65019, 'truncated parsed contact port should prefer authoritative source_port for network port display');
-$natAddress = registration_address_details_contract('sip:2003@198.51.100.44:65019;ob;x-ast-orig-host=10.0.0.44:5060', '198.51.100.44', 65019);
-assert_true((int)$natAddress['device_port'] === 5060 && (int)$natAddress['network_port'] === 65019, 'x-ast-orig-host should preserve device/network port split for NAT display');
+$truncatedContact = enrich_for_identity_contract(
+	[
+		'extension' => '01142990567',
+		'contact_uri' => 'sip:01142990567@138.124.129.209:50',
+		'source_ip' => '138.124.129.209',
+		'source_port' => 50,
+		'user_agent' => null,
+	],
+	[
+		[
+			'extension' => '01142990567',
+			'contact_uri' => 'sip:01142990567@138.124.129.209:5060;x-ast-orig-host=192.168.20.228:5060',
+			'source_ip' => '138.124.129.209',
+			'source_port' => 50,
+			'user_agent' => null,
+		],
+	]
+);
+assert_true(strpos((string)$truncatedContact['contact_uri'], ':5060') !== false, 'truncated parsed contact URI should be repaired from registrar contact URI');
+assert_true((int)($truncatedContact['source_port'] ?? 0) === 5060, 'truncated parsed source port should be repaired from registrar contact URI when registrar source_port is truncated');
 
 $fallbackContact = enrich_for_identity_contract(
 	[

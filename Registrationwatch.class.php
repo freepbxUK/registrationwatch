@@ -2643,10 +2643,21 @@ class Registrationwatch implements \BMO {
 					$contact[$field] = $detail[$field];
 				}
 			}
-			if (($detail['source_port'] ?? null) !== null) {
-				$contact['source_port'] = $detail['source_port'];
-			}
+			$contact = $this->applyRegistrarPortDetails($contact, $detail);
 			return $contact;
+		}
+
+		if (count($fallbackCandidates) === 1) {
+			$detail = $fallbackCandidates[0];
+			if ($this->shouldPromoteRegistrarContactUri(
+				$contact['contact_uri'] ?? null,
+				$detail['contact_uri'] ?? null,
+				$contact['source_ip'] ?? null,
+				$detail['source_ip'] ?? null
+			)) {
+				$contact['contact_uri'] = (string)$detail['contact_uri'];
+			}
+			$contact = $this->applyRegistrarPortDetails($contact, $detail);
 		}
 
 		foreach ($fallbackCandidates as $detail) {
@@ -2658,12 +2669,74 @@ class Registrationwatch implements \BMO {
 					$contact[$field] = $detail[$field];
 				}
 			}
-			if (($detail['source_port'] ?? null) !== null) {
-				$contact['source_port'] = $detail['source_port'];
-			}
+			$contact = $this->applyRegistrarPortDetails($contact, $detail);
 		}
 
 		return $contact;
+	}
+
+	private function normalisePortNumber($value): ?int {
+		if ($value === null || $value === '' || !is_numeric($value)) {
+			return null;
+		}
+
+		$port = (int)$value;
+		return ($port > 0 && $port <= 65535) ? $port : null;
+	}
+
+	private function applyRegistrarPortDetails(array $contact, array $detail): array {
+		$detailSourcePort = $this->normalisePortNumber($detail['source_port'] ?? null);
+		$detailUriAddress = $this->parseContactUriAddress(isset($detail['contact_uri']) ? (string)$detail['contact_uri'] : null);
+		$detailUriPort = $this->normalisePortNumber($detailUriAddress['port'] ?? null);
+
+		$resolvedPort = $detailSourcePort;
+		if ($resolvedPort === null) {
+			$resolvedPort = $detailUriPort;
+		} elseif ($detailUriPort !== null && $detailUriPort !== $resolvedPort) {
+			$sourceText = (string)$resolvedPort;
+			$uriText = (string)$detailUriPort;
+			if (strlen($uriText) > strlen($sourceText) && strpos($uriText, $sourceText) === 0) {
+				$resolvedPort = $detailUriPort;
+			}
+		}
+
+		if ($resolvedPort !== null) {
+			$contact['source_port'] = $resolvedPort;
+		}
+
+		return $contact;
+	}
+
+	private function shouldPromoteRegistrarContactUri($parsedContactUri, $registrarContactUri, $parsedSourceIp, $registrarSourceIp): bool {
+		$parsedContactUri = trim((string)$parsedContactUri);
+		$registrarContactUri = trim((string)$registrarContactUri);
+		if ($parsedContactUri === '' || $registrarContactUri === '') {
+			return false;
+		}
+
+		$parsedAddress = $this->parseContactUriAddress($parsedContactUri);
+		$registrarAddress = $this->parseContactUriAddress($registrarContactUri);
+		$parsedHost = $this->normaliseSourceIp($parsedAddress['host'] ?? '');
+		$registrarHost = $this->normaliseSourceIp($registrarAddress['host'] ?? '');
+		if ($parsedHost === '' || $registrarHost === '' || $parsedHost !== $registrarHost) {
+			return false;
+		}
+
+		$parsedPort = $this->normalisePortNumber($parsedAddress['port'] ?? null);
+		$registrarPort = $this->normalisePortNumber($registrarAddress['port'] ?? null);
+		if ($parsedPort === null || $registrarPort === null || $parsedPort === $registrarPort) {
+			return false;
+		}
+
+		$parsedIp = $this->normaliseSourceIp($parsedSourceIp);
+		$registrarIp = $this->normaliseSourceIp($registrarSourceIp);
+		if ($parsedIp === '' || $registrarIp === '' || $parsedIp !== $registrarIp) {
+			return false;
+		}
+
+		$parsedText = (string)$parsedPort;
+		$registrarText = (string)$registrarPort;
+		return strlen($registrarText) > strlen($parsedText) && strpos($registrarText, $parsedText) === 0;
 	}
 
 	private function contactUrisMatchForEnrichment($left, $right): bool {
@@ -2939,32 +3012,6 @@ class Registrationwatch implements \BMO {
 
 		$deviceAddress = $hasOriginalAddress ? $originalAddress : $contactAddress;
 		$networkAddress = $hasOriginalAddress ? $contactAddress : ['host' => null, 'port' => null];
-		$normalisedSourceIp = $this->normaliseSourceIp($sourceIp);
-		$sourcePortNumber = null;
-		if ($sourcePort !== null && $sourcePort !== '' && is_numeric($sourcePort)) {
-			$candidatePort = (int)$sourcePort;
-			if ($candidatePort > 0 && $candidatePort <= 65535) {
-				$sourcePortNumber = $candidatePort;
-			}
-		}
-
-		if (!$hasOriginalAddress
-			&& $sourcePortNumber !== null
-			&& ($contactAddress['port'] ?? null) !== null
-			&& $normalisedSourceIp !== ''
-			&& $this->normaliseSourceIp((string)($contactAddress['host'] ?? '')) === $normalisedSourceIp
-		) {
-			$parsedPort = (int)$contactAddress['port'];
-			$parsedPortText = (string)$parsedPort;
-			$sourcePortText = (string)$sourcePortNumber;
-			if ($parsedPort !== $sourcePortNumber
-				&& strlen($sourcePortText) > strlen($parsedPortText)
-				&& strpos($sourcePortText, $parsedPortText) === 0
-			) {
-				$deviceAddress['port'] = $sourcePortNumber;
-				$networkAddress['port'] = $sourcePortNumber;
-			}
-		}
 
 		if ($networkAddress['host'] === null && trim((string)$sourceIp) !== '') {
 			$networkAddress['host'] = $sourceIp;

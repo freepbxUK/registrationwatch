@@ -465,6 +465,7 @@ extensions whose contact identity changes.
 
 * Improves registrar user-agent parsing for Sangoma P-series phones so firmware tokens such as `4_27_8` are shown in Version instead of `-` when present.
 * Normalises user-facing reason labels so `ip_address_change` renders as `IP address change`.
+* Repairs truncated contact URI port values during registrar enrichment, so stored contact/source ports are corrected at source while preserving NAT device/network port split handling.
 
 #### Monitoring state authority
 
