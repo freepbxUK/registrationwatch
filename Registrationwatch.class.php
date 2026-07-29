@@ -1086,6 +1086,14 @@ class Registrationwatch implements \BMO {
 		$allowedDevices = $allowedDevices === null ? $this->getAllowedPjsipDeviceIds() : $allowedDevices;
 		$liveContacts = $liveContacts === null ? $this->getLiveContacts($allowedDevices) : $liveContacts;
 		$liveContactKeys = array_fill_keys(array_keys($liveContacts), true);
+		$liveKeysByExtension = [];
+		foreach ($liveContacts as $liveContact) {
+			$liveExtension = $this->normaliseRegistrationExtension((string)($liveContact['extension'] ?? ''));
+			if ($liveExtension === '') {
+				continue;
+			}
+			$liveKeysByExtension[$liveExtension][] = (string)($liveContact['registration_key'] ?? '');
+		}
 		$descriptions = $this->getRegistrationDescriptions();
 		$liveExtensions = [];
 		$db = $this->db();
@@ -1184,7 +1192,13 @@ class Registrationwatch implements \BMO {
 				continue;
 			}
 
+			$deadCandidateDiagnostics = $this->singleDeadCandidateDiagnostics($extension, (string)$registration['registration_key'], $liveKeysByExtension[$this->normaliseRegistrationExtension($extension)] ?? []);
+			$this->logSingleDeadCandidateDiagnostics($deadCandidateDiagnostics);
+
 			$deadRegistrationId = $this->singleDeadRegistrationId($extension, $liveContactKeys);
+			if ($deadRegistrationId <= 0) {
+				$this->logInfo('Registration Watch continuity reuse rejected: ' . ($deadCandidateDiagnostics['rejection_reason'] ?? 'unknown'));
+			}
 			if ($deadRegistrationId > 0) {
 				$update = $db->prepare(
 					'UPDATE registrationwatch_registrations
@@ -1228,6 +1242,8 @@ class Registrationwatch implements \BMO {
 				]);
 				continue;
 			}
+
+			$this->logInfo('Registration Watch continuity fallback insert enabled=0 for extension ' . $this->normaliseRegistrationExtension($extension) . ', registration_key ' . (string)$registration['registration_key']);
 
 			$insert = $db->prepare(
 				'INSERT INTO registrationwatch_registrations
@@ -1388,6 +1404,118 @@ class Registrationwatch implements \BMO {
 		$ids = $stmt->fetchAll(\PDO::FETCH_COLUMN, 0);
 
 		return count($ids) === 1 ? (int)$ids[0] : 0;
+	}
+
+	private function singleDeadCandidateDiagnostics(string $extension, string $newRegistrationKey, array $extensionLiveKeys): array {
+		$normalisedExtension = $this->normaliseRegistrationExtension($extension);
+		$placeholderKey = $this->noContactRegistrationKey($normalisedExtension);
+
+		$stmt = $this->db()->prepare(
+			'SELECT id, registration_key, source_ip, discovered, last_known_status, enabled
+			FROM registrationwatch_registrations
+			WHERE extension = :extension
+			ORDER BY id ASC'
+		);
+		$stmt->execute([':extension' => $normalisedExtension]);
+		$rows = $stmt->fetchAll(\PDO::FETCH_ASSOC);
+
+		$liveKeysSet = [];
+		foreach ($extensionLiveKeys as $liveKey) {
+			$liveKeysSet[(string)$liveKey] = true;
+		}
+
+		$candidateCount = 0;
+		$predicateMisses = [
+			'discovered' => 0,
+			'source_ip' => 0,
+			'placeholder' => 0,
+			'live_key_conflict' => 0,
+		];
+		$rowDiagnostics = [];
+
+		foreach ($rows as $row) {
+			$rowKey = (string)($row['registration_key'] ?? '');
+			$hasSourceIp = trim((string)($row['source_ip'] ?? '')) !== '';
+			$isDiscovered = (int)($row['discovered'] ?? 0) === 1;
+			$isPlaceholder = $rowKey === $placeholderKey;
+			$isLiveKey = isset($liveKeysSet[$rowKey]);
+
+			$predicate = [
+				'discovered' => $isDiscovered,
+				'has_source_ip' => $hasSourceIp,
+				'not_placeholder' => !$isPlaceholder,
+				'not_live_key' => !$isLiveKey,
+			];
+
+			$eligible = $predicate['discovered']
+				&& $predicate['has_source_ip']
+				&& $predicate['not_placeholder']
+				&& $predicate['not_live_key'];
+
+			if ($eligible) {
+				$candidateCount++;
+			} else {
+				if (!$predicate['discovered']) {
+					$predicateMisses['discovered']++;
+				}
+				if (!$predicate['has_source_ip']) {
+					$predicateMisses['source_ip']++;
+				}
+				if (!$predicate['not_placeholder']) {
+					$predicateMisses['placeholder']++;
+				}
+				if (!$predicate['not_live_key']) {
+					$predicateMisses['live_key_conflict']++;
+				}
+			}
+
+			$rowDiagnostics[] = [
+				'id' => (int)($row['id'] ?? 0),
+				'registration_key' => $rowKey,
+				'source_ip' => $row['source_ip'] ?? null,
+				'discovered' => (int)($row['discovered'] ?? 0),
+				'is_placeholder' => $isPlaceholder,
+				'last_known_status' => (string)($row['last_known_status'] ?? ''),
+				'enabled' => (int)($row['enabled'] ?? 0),
+				'predicates' => $predicate,
+				'eligible' => $eligible,
+			];
+		}
+
+		$rejectionReason = 'single dead candidate found';
+		if ($candidateCount === 0) {
+			$reasons = [];
+			if ($predicateMisses['discovered'] > 0) {
+				$reasons[] = 'rows not discovered=' . $predicateMisses['discovered'];
+			}
+			if ($predicateMisses['source_ip'] > 0) {
+				$reasons[] = 'rows missing source_ip=' . $predicateMisses['source_ip'];
+			}
+			if ($predicateMisses['placeholder'] > 0) {
+				$reasons[] = 'placeholder rows=' . $predicateMisses['placeholder'];
+			}
+			if ($predicateMisses['live_key_conflict'] > 0) {
+				$reasons[] = 'rows still live in current keyset=' . $predicateMisses['live_key_conflict'];
+			}
+			$rejectionReason = 'no dead candidates; ' . ($reasons ? implode(', ', $reasons) : 'no rows matched predicate set');
+		} elseif ($candidateCount > 1) {
+			$rejectionReason = 'ambiguous dead candidates count=' . $candidateCount;
+		}
+
+		return [
+			'extension' => $normalisedExtension,
+			'new_registration_key' => $newRegistrationKey,
+			'live_keys_for_extension' => array_values(array_unique(array_filter(array_map('strval', $extensionLiveKeys), function ($key) {
+				return $key !== '';
+			}))),
+			'rows' => $rowDiagnostics,
+			'candidate_count' => $candidateCount,
+			'rejection_reason' => $rejectionReason,
+		];
+	}
+
+	private function logSingleDeadCandidateDiagnostics(array $diagnostics): void {
+		$this->logInfo('Registration Watch continuity candidate diagnostics: ' . json_encode($diagnostics));
 	}
 
 	private function getPjsipRegistrationTargets(): array {
