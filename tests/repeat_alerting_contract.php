@@ -541,7 +541,7 @@ function apply_auto_handover_contract(PDO $db, string $extension, array $live, s
 	}
 
 	$dupes = array_values(array_filter($rows, function ($row) use ($newKey, $oldId) {
-		return (int)$row['id'] !== $oldId && (string)$row['registration_key'] === $newKey && (int)($row['enabled'] ?? 0) === 0;
+		return (int)$row['id'] !== $oldId && (string)$row['registration_key'] === $newKey;
 	}));
 	if (count($dupes) !== 1) {
 		rw_clear_state($db, $extension);
@@ -591,7 +591,7 @@ function apply_auto_handover_contract(PDO $db, string $extension, array $live, s
 
 	$db->beginTransaction();
 	try {
-		$db->prepare('DELETE FROM registrationwatch_registrations WHERE id = ? AND enabled = 0')->execute([(int)$dupes[0]['id']]);
+		$db->prepare('DELETE FROM registrationwatch_registrations WHERE id = ?')->execute([(int)$dupes[0]['id']]);
 		$db->prepare('UPDATE registrationwatch_registrations SET registration_key = ?, source_ip = ?, source_port = ?, last_known_status = ? WHERE id = ?')
 			->execute([$newKey, (string)($new['source_ip'] ?? ''), $new['source_port'] ?? null, 'Reachable', $oldId]);
 		$db->prepare('UPDATE registrationwatch_alert_escalation SET registration_key = ? WHERE registration_id = ?')->execute([$newKey, $oldId]);
@@ -1187,6 +1187,38 @@ assert_true((int)$postReplace['enabled'] === 1 && (string)$postReplace['repeat_m
 assert_true((int)$db->query("SELECT COUNT(*) FROM registrationwatch_registrations WHERE id = {$newReplaceDupId}")->fetchColumn() === 0, 'handover should remove disabled replacement duplicate');
 assert_true((string)$db->query("SELECT reason FROM registrationwatch_status_history WHERE registration_id = {$oldReplaceId} ORDER BY id DESC LIMIT 1")->fetchColumn() === 'ip_address_change', 'handover should record ip_address_change reason');
 assert_true((string)$db->query("SELECT registration_key FROM registrationwatch_alert_escalation WHERE registration_id = {$oldReplaceId}")->fetchColumn() === $newReplaceKey, 'handover should preserve escalation and retarget key');
+
+$monitoredExt = '2026';
+$monitoredOldKey = registration_key($monitoredExt, '150.228.103.35');
+$monitoredNewKey = registration_key($monitoredExt, '150.228.103.201');
+set_extension_monitoring_state_contract($db, $monitoredExt, 1);
+$db->prepare('INSERT INTO registrationwatch_registrations (registration_key, extension, source_ip, source_port, enabled, discovered, last_known_status, first_discovered_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+	->execute([$monitoredOldKey, $monitoredExt, '150.228.103.35', 5060, 1, 1, 'Not registered', '2026-06-15 10:00:00']);
+$monitoredOldId = (int)$db->lastInsertId();
+$db->prepare('INSERT INTO registrationwatch_registrations (registration_key, extension, source_ip, source_port, enabled, discovered, last_known_status, first_discovered_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+	->execute([$monitoredNewKey, $monitoredExt, '150.228.103.201', 5090, 0, 1, 'Reachable', '2026-06-15 10:00:00']);
+$monitoredNewId = (int)$db->lastInsertId();
+normalise_extension_monitoring_state_contract($db);
+assert_true((int)$db->query("SELECT COUNT(*) FROM registrationwatch_registrations WHERE extension = '2026' AND enabled = 1")->fetchColumn() === 2, 'extension monitoring authority should keep both old and replacement rows enabled');
+$handoverLive2026 = [
+	$monitoredNewKey => [
+		'registration_key' => $monitoredNewKey,
+		'extension' => $monitoredExt,
+		'source_ip' => '150.228.103.201',
+		'source_port' => 5090,
+		'status' => 'Reachable',
+	],
+];
+$m1 = apply_auto_handover_contract($db, $monitoredExt, $handoverLive2026, '2026-06-15 10:10:00', 10);
+$m2 = apply_auto_handover_contract($db, $monitoredExt, $handoverLive2026, '2026-06-15 10:10:20', 10);
+assert_true($m1['committed'] === false && $m2['committed'] === true, 'monitored extension handover should still commit when both rows are enabled');
+$monitoredPost = $db->query("SELECT id, registration_key, source_ip, enabled, last_known_status FROM registrationwatch_registrations WHERE extension = '2026'")->fetch(PDO::FETCH_ASSOC);
+assert_true((int)$monitoredPost['id'] === $monitoredOldId, 'enabled+enabled handover should preserve old row id');
+assert_true((string)$monitoredPost['registration_key'] === $monitoredNewKey && (string)$monitoredPost['source_ip'] === '150.228.103.201', 'enabled+enabled handover should update identity to replacement key and IP');
+assert_true((int)$monitoredPost['enabled'] === 1 && (string)$monitoredPost['last_known_status'] === 'Reachable', 'enabled+enabled handover should leave monitored row enabled and reachable');
+assert_true((int)$db->query("SELECT COUNT(*) FROM registrationwatch_registrations WHERE extension = '2026'")->fetchColumn() === 1, 'enabled+enabled handover should remove replacement duplicate row after preserving continuity');
+assert_true((int)$db->query("SELECT COUNT(*) FROM registrationwatch_registrations WHERE id = {$monitoredNewId}")->fetchColumn() === 0, 'enabled+enabled handover should delete replacement row id after continuity merge');
+assert_true((string)$db->query("SELECT reason FROM registrationwatch_status_history WHERE registration_id = {$monitoredOldId} ORDER BY id DESC LIMIT 1")->fetchColumn() === 'ip_address_change', 'enabled+enabled handover should record ip_address_change history reason');
 
 $topOldKey = registration_key('2017', '145.224.67.213');
 $topNewKey = registration_key('2017', '217.142.20.123');

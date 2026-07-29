@@ -2161,8 +2161,7 @@ class Registrationwatch implements \BMO {
 
 			$duplicateRows = array_values(array_filter($rows, function ($row) use ($oldId, $newKey) {
 				return (int)($row['id'] ?? 0) !== $oldId
-					&& (string)($row['registration_key'] ?? '') === $newKey
-					&& (int)($row['enabled'] ?? 0) === 0;
+					&& (string)($row['registration_key'] ?? '') === $newKey;
 			}));
 			if (count($duplicateRows) !== 1) {
 				if ($state) {
@@ -2272,8 +2271,7 @@ class Registrationwatch implements \BMO {
 					'DELETE FROM registrationwatch_registrations
 					WHERE id = :id
 						AND extension = :extension
-						AND registration_key = :registration_key
-						AND enabled = 0'
+						AND registration_key = :registration_key'
 				);
 				$deleteDuplicate->execute([
 					':id' => (int)$duplicateRow['id'],
