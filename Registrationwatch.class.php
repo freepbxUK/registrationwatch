@@ -13,7 +13,7 @@ namespace FreePBX\modules;
 class Registrationwatch implements \BMO {
 
 	/** Fallback only. Authoritative version lives in module.xml. */
-	const VERSION = '1.3.1';
+	const VERSION = '1.4.0';
 
 	const STATUS_REACHABLE = 'Reachable';
 	const STATUS_UNREACHABLE = 'Unreachable';
@@ -869,6 +869,21 @@ class Registrationwatch implements \BMO {
 		];
 	}
 
+	private function getSystemIdentifier(): string {
+		try {
+			if (!class_exists('\\FreePBX')) {
+				return 'unknown system';
+			}
+			$value = trim((string)\FreePBX::Config()->get('FREEPBX_SYSTEM_IDENT'));
+			if ($value !== '') {
+				return preg_replace('/\s+/', ' ', $value) ?? $value;
+			}
+		} catch (\Throwable $e) {
+		}
+
+		return 'unknown system';
+	}
+
 	private function handleTestEmail(): array {
 		$settings = $this->getAlertSettings();
 		$recipients = $this->normaliseRecipients($settings['alert_recipients']);
@@ -881,7 +896,7 @@ class Registrationwatch implements \BMO {
 		$failed = 0;
 		foreach ($recipients as $recipient) {
 			$subject = _('Registration Watch: test email');
-			$message = "Registration Watch test email\n\nTime: " . $now . "\nSource: manual test\n\nPlease note: Email \"From:\" Address has been configured in Advanced Settings.\n";
+			$message = 'Registration Watch test email from ' . $this->getSystemIdentifier() . "\n\nTime: " . $now . "\nSource: manual test\n\nPlease note: Email \"From:\" Address has been configured in Advanced Settings.\n";
 			$result = $this->sendEmail($recipient, $subject, $message);
 			if ($result['status']) {
 				$sent++;
@@ -3773,7 +3788,7 @@ class Registrationwatch implements \BMO {
 			? _('Registration Watch: Storm Summary (1 alert suppressed)')
 			: sprintf(_('Registration Watch: Storm Summary (%d alerts suppressed)'), $total);
 		$message = [
-			_('Registration Watch Storm Summary'),
+			_('Registration Watch Storm Summary') . ' from ' . $this->getSystemIdentifier(),
 			'',
 			$total === 1
 				? _('1 alert email was suppressed in this processing pass.')
@@ -4493,7 +4508,8 @@ class Registrationwatch implements \BMO {
 
 		$still = ($isReminder && $alertType !== 'recovery') ? 'still ' : '';
 		$subject = 'Registration Watch: ' . $extension . ' ' . ($alertType === 'recovery' ? $subjectStatus : 'is ' . $still . $subjectStatus);
-		$latency = $transition['latency_ms'] !== null && $transition['latency_ms'] !== '' ? $transition['latency_ms'] . ' ms' : 'Unavailable';
+		$latencyValue = $transition['latency_ms'] ?? null;
+		$latency = $latencyValue !== null && $latencyValue !== '' ? (string)$latencyValue . ' ms' : 'Unavailable';
 		if ($toState === self::STATUS_REGISTERED_NO_QUALIFY) {
 			$latency = 'Unavailable; qualify is not enabled.';
 		}
@@ -4520,9 +4536,10 @@ class Registrationwatch implements \BMO {
 				$reasonLine[] = 'Reminder: ' . $reminderN;
 			}
 		}
+		$systemIdentifier = $this->getSystemIdentifier();
 		$message = array_merge(
 			[
-				'Registration Watch state change',
+				'Registration Watch state change from ' . $systemIdentifier,
 				'',
 				'Extension: ' . $extension,
 				'New state: ' . $this->stateLabel($toState),

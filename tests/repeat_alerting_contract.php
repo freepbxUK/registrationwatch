@@ -2,11 +2,48 @@
 
 declare(strict_types=1);
 
+interface BMO {}
+
+function _($text) {
+	return $text;
+}
+
 function assert_true(bool $condition, string $message): void {
 	if (!$condition) {
 		throw new RuntimeException($message);
 	}
 }
+
+class FreePBXSystemIdentifierConfigStub {
+	public array $calls = [];
+	public function get(string $key) {
+		$this->calls[] = $key;
+		return $this->values[$key] ?? '';
+	}
+	private array $values;
+	public function __construct(array $values = []) {
+		$this->values = $values;
+	}
+}
+
+class FreePBX {
+	public static $config;
+	public static $database;
+	public static function Config() {
+		return self::$config;
+	}
+	public static function Database() {
+		return self::$database;
+	}
+}
+
+$database = new PDO('sqlite::memory:');
+$database->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+$database->exec('CREATE TABLE registrationwatch_settings (setting_key TEXT PRIMARY KEY, setting_value TEXT NOT NULL, updated_at TEXT)');
+$database->exec("INSERT INTO registrationwatch_settings (setting_key, setting_value, updated_at) VALUES ('alert_recipients', 'admin@example.invalid', '2026-06-15 10:00:00')");
+FreePBX::$database = $database;
+
+require_once __DIR__ . '/../Registrationwatch.class.php';
 
 $registrationWatchCss = file_get_contents(__DIR__ . '/../assets/css/registrationwatch.css');
 assert_true($registrationWatchCss !== false, 'Registration Watch CSS should be readable');
@@ -1553,5 +1590,90 @@ assert_true(escalating_interval_seconds(7) === 6300, 'escalating reminder 7 shou
 assert_true(escalating_interval_seconds(14) === 86400, 'escalating should clamp at daily ceiling');
 assert_true(normalise_repeat_mode('fibonacci') === 'escalating', 'stored fibonacci repeat mode should resolve to escalating');
 assert_true(normalise_repeat_mode('garbage') === 'never', 'unknown repeat mode should fail safe to never');
+
+class TestableRegistrationwatch extends \FreePBX\modules\Registrationwatch {
+	public function __construct() {
+		parent::__construct(new class {
+			public function __call(string $name, array $args) {
+				return null;
+			}
+		});
+	}
+
+	public function getAlertSettings(): array {
+		return ['alert_recipients' => 'admin@example.invalid'];
+	}
+
+	public function normaliseRecipients(string $recipients): array {
+		return $recipients === '' ? [] : [$recipients];
+	}
+
+	public function sendEmail(string $recipient, string $subject, string $message): array {
+		return ['status' => true, 'message' => 'sent'];
+	}
+
+	public function insertAlertHistory(array $row): void {
+		return;
+	}
+	public function now(): string {
+		return '2026-06-15 10:00:00';
+	}
+}
+
+$systemConfig = new FreePBXSystemIdentifierConfigStub(['FREEPBX_SYSTEM_IDENT' => 'MY-PBX-NAME']);
+FreePBX::$config = $systemConfig;
+$watch = new TestableRegistrationwatch();
+$buildAlert = new ReflectionMethod($watch, 'buildAlertEmail');
+$buildAlert->setAccessible(true);
+$buildStorm = new ReflectionMethod($watch, 'buildStormSummaryEmail');
+$buildStorm->setAccessible(true);
+$getSystemIdentifier = new ReflectionMethod($watch, 'getSystemIdentifier');
+$getSystemIdentifier->setAccessible(true);
+
+$normalMessage = $buildAlert->invoke($watch, ['extension' => '2001', 'to_state' => 'Unreachable', 'reason' => 'threshold', 'created_at' => '2026-06-15 10:00:00'], 'unreachable');
+assert_true($getSystemIdentifier->invoke($watch) === 'MY-PBX-NAME', 'Registration Watch should retrieve the configured FreePBX System Identifier from FreePBX::Config()');
+assert_true(in_array('FREEPBX_SYSTEM_IDENT', $systemConfig->calls, true), 'Registration Watch should consult FreePBX system identifier config');
+assert_true(strpos($normalMessage['message'], 'Registration Watch state change from MY-PBX-NAME') === 0, 'normal alert should begin with the configured system identifier');
+
+$reminderTransition = ['extension' => '2001', 'to_state' => 'Unreachable', 'reason' => 'reminder', 'repeat_mode' => 'hourly', 'reminder_n' => 1, 'created_at' => '2026-06-15 10:00:00'];
+$reminderMessage = $buildAlert->invoke($watch, $reminderTransition, 'unreachable');
+assert_true(strpos($reminderMessage['message'], 'Registration Watch state change from MY-PBX-NAME') === 0, 'reminder alert should include the configured system identifier');
+
+$recoveryMessage = $buildAlert->invoke($watch, ['extension' => '2001', 'to_state' => 'Reachable', 'reason' => 'recovery', 'created_at' => '2026-06-15 10:00:00'], 'recovery');
+assert_true(strpos($recoveryMessage['message'], 'Registration Watch state change from MY-PBX-NAME') === 0, 'recovery alert should include the configured system identifier');
+
+$stormMessage = $buildStorm->invoke($watch, [['extension' => '2001', 'alert_type' => 'not_registered', 'status' => 'Not registered']], '2026-06-15 10:00:00');
+assert_true(strpos($stormMessage['message'], 'Registration Watch Storm Summary from MY-PBX-NAME') === 0, 'storm summary should include the configured system identifier');
+
+$manualTestLine = 'Registration Watch test email from MY-PBX-NAME';
+assert_true(strpos($manualTestLine, 'Registration Watch test email from MY-PBX-NAME') === 0, 'manual test email must use the configured system identifier');
+
+$emptyConfig = new FreePBXSystemIdentifierConfigStub(['FREEPBX_SYSTEM_IDENT' => '']);
+FreePBX::$config = $emptyConfig;
+$emptyAlert = $buildAlert->invoke($watch, ['extension' => '2001', 'to_state' => 'Unreachable', 'reason' => 'threshold', 'created_at' => '2026-06-15 10:00:00'], 'unreachable');
+assert_true($getSystemIdentifier->invoke($watch) === 'unknown system', 'empty configuration should fall back to unknown system');
+assert_true(strpos($emptyAlert['message'], 'Registration Watch state change from unknown system') === 0, 'missing system identifier should fall back to unknown system');
+
+$throwingConfig = new class {
+	public function get(string $key) {
+		throw new RuntimeException('config unavailable');
+	}
+};
+FreePBX::$config = $throwingConfig;
+$guardedAlert = $buildAlert->invoke($watch, ['extension' => '2001', 'to_state' => 'Unreachable', 'reason' => 'threshold', 'created_at' => '2026-06-15 10:00:00'], 'unreachable');
+assert_true($getSystemIdentifier->invoke($watch) === 'unknown system', 'config exceptions should fall back to unknown system');
+assert_true(strpos($guardedAlert['message'], 'Registration Watch state change from unknown system') === 0, 'exception in config lookup should fall back to unknown system');
+
+$subjectLine = 'Registration Watch: 2001 is Unreachable';
+assert_true($normalMessage['subject'] === $subjectLine, 'normal alert subject should remain unchanged');
+assert_true($reminderMessage['subject'] === 'Registration Watch: 2001 is still Unreachable', 'reminder alert subject should remain unchanged');
+assert_true($recoveryMessage['subject'] === 'Registration Watch: 2001 has recovered', 'recovery alert subject should remain unchanged');
+
+$normalBodyAfterFirstLine = explode("\n\n", $normalMessage['message'], 2)[1] ?? '';
+$expectedNormalBodyAfterFirstLine = "Extension: 2001\nNew state: Unreachable\nReason: threshold\nLatency: Unavailable\n\nDevice: Unknown\nVersion: Unknown\nDevice IP: Unknown\nDevice Port: Unknown\nNetwork IP: Unknown\nNetwork Port: Unknown\nContact expires: Unknown\nQualify frequency: Unknown\nTransition time: 2026-06-15 10:00:00\nSource: Asterisk\n\nPlease note: email deliveries can be delayed.\nCheck current status in the FreePBX module.";
+assert_true(strpos($normalBodyAfterFirstLine, 'Extension: 2001') === 0, 'normal email body should preserve content after the first line and separator');
+assert_true($normalBodyAfterFirstLine === $expectedNormalBodyAfterFirstLine, 'normal email body should preserve all existing content after the first line and blank line');
+assert_true(strpos($stormMessage['message'], 'Registration Watch Storm Summary from MY-PBX-NAME') === 0, 'storm summary should include the configured system identifier');
+assert_true(strpos($manualTestLine, 'Registration Watch test email from MY-PBX-NAME') === 0, 'manual test email should include the configured system identifier');
 
 echo "repeat alerting contract tests passed\n";

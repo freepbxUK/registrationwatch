@@ -1,4 +1,4 @@
-# Registration Watch 1.3.1 for FreePBX 16 and 17
+# Registration Watch 1.4.0 for FreePBX 16 and 17
 
 Registration Watch (`registrationwatch`) watches PJSIP registration state in
 FreePBX/PBXact 16 and 17. It discovers configured FreePBX PJSIP devices and tracks
@@ -14,9 +14,20 @@ version, contact expiry, qualify interval, and latency. These details depend on
 what Asterisk exposes for the registration and may not be available for every
 device or system.
 
+Email alerts include the configured FreePBX System Identifier so administrators
+monitoring multiple PBXs can immediately identify the originating system. For
+example, alert bodies begin with lines such as:
+
+* Registration Watch state change from MY-PBX-NAME
+* Registration Watch Storm Summary from MY-PBX-NAME
+* Registration Watch test email from MY-PBX-NAME
+
+If the system identifier cannot be obtained from FreePBX, Registration Watch
+falls back to a sensible `unknown system` label instead of failing email delivery.
+
 ## Release Status
 
-Registration Watch 1.3.1 is the current release for FreePBX 16 and 17.
+Registration Watch 1.4.0 is the current release for FreePBX 16 and 17.
 
 Use the `main` branch for stable releases. Development and release-candidate
 branches may contain incomplete or test-only changes.
@@ -425,6 +436,16 @@ This module has been developed with AI assistance for code generation, review, t
 @kierknoby, Kieran Knowles-Byrne // FreePBX UK
 
 ## Release History
+
+### 1.4.0, minor release, 20 August 2026
+
+Released by `@kierknoby, Kieran Knowles-Byrne // FreePBX UK`.
+
+This release adds the configured FreePBX System Identifier to each Registration
+Watch email body so administrators monitoring multiple PBXs can immediately tell
+which system sent the alert, summary, or test email. It preserves the existing
+subject lines and uses the same `unknown system` fallback as Repeat Caller when
+that identifier cannot be read.
 
 ### 1.3.1, patch release, 29 July 2026
 
