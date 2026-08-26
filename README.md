@@ -423,18 +423,6 @@ fwconsole chown
 fwconsole reload
 ```
 
-## Licence
-
-GPLv3+. See LICENSE.
-
-## AI Disclosure
-
-This module has been developed with AI assistance for code generation, review, testing, and documentation. Changes should still be reviewed, tested, and accepted by a human maintainer before deployment.
-
-## Author
-
-@kierknoby, Kieran Knowles-Byrne // FreePBX UK
-
 ## Release History
 
 ### 1.4.0, minor release, 20 August 2026
@@ -731,3 +719,23 @@ This patch release fixes duplicate alert and duplicate UI handling issues found 
 * Cleans up minor alert email copy.
 * Adds clearer 1.0.1 release headings to the README.
 * Documents EndPoint Monitor update paths.
+
+## Licence
+
+GPLv3+. See LICENSE.
+
+## AI-Assisted Contributions and Disclosure
+
+This module has been developed with AI assistance for code generation, review, testing, and documentation. From 26 August 2026, generative AI assistance must be disclosed in every commit containing AI-assisted changes:
+
+```text
+Assisted-by: AGENT_NAME:MODEL_VERSION
+```
+
+For example: `Assisted-by: GitHub-Copilot:gpt-5.6-sol`
+
+The human contributor remains solely responsible for the contribution. AI tools must not be listed as co-authors.
+
+## Author
+
+[@kierknoby](https://github.com/kierknoby), Kieran Knowles-Byrne // [FreePBX UK](https://github.com/freepbxUK)
