@@ -11,9 +11,14 @@ function compatibility_assert(bool $condition, string $message): void {
 $root = dirname(__DIR__);
 $moduleXml = simplexml_load_file($root . '/module.xml');
 compatibility_assert($moduleXml !== false, 'module.xml should parse');
-compatibility_assert((string)$moduleXml->version === '1.4.0', 'module version should be 1.4.0');
+compatibility_assert((string)$moduleXml->version === '1.4.1', 'module version should be 1.4.1');
 compatibility_assert((string)$moduleXml->depends->version === '16.0', 'minimum FreePBX version should be 16.0');
-compatibility_assert((string)$moduleXml->supported->version === '16.0', 'supported release metadata should be 16.0 for the shared FreePBX 16 and 17 package');
+$supportedVersions = [];
+foreach ($moduleXml->supported->version as $supportedVersion) {
+	$supportedVersions[] = (string)$supportedVersion;
+}
+compatibility_assert(in_array('16.0', $supportedVersions, true), 'supported release metadata should include FreePBX 16.0');
+compatibility_assert(in_array('17.0', $supportedVersions, true), 'supported release metadata should include FreePBX 17.0');
 
 $productionFiles = [
 	'Job.php',

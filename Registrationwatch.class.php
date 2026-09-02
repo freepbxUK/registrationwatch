@@ -13,7 +13,7 @@ namespace FreePBX\modules;
 class Registrationwatch implements \BMO {
 
 	/** Fallback only. Authoritative version lives in module.xml. */
-	const VERSION = '1.4.0';
+	const VERSION = '1.4.1';
 
 	const STATUS_REACHABLE = 'Reachable';
 	const STATUS_UNREACHABLE = 'Unreachable';
