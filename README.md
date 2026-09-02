@@ -183,6 +183,32 @@ fwconsole reload
 After updating, open Reports > Registration Watch and confirm that existing watched
 registrations, settings, and history are still present.
 
+## Support and Feedback
+
+Registration Watch is maintained by FreePBX UK.
+
+For installation help, configuration questions, troubleshooting, or general support, contact FreePBX UK:
+
+https://freepbx.uk/support/
+
+For source code, release history, and project information:
+
+https://github.com/freepbxUK/registrationwatch
+
+When requesting support, include the following where relevant:
+
+- FreePBX or PBXact version
+- Registration Watch version
+- Asterisk version
+- whether the affected device is PJSIP
+- the extension or registration behaviour being observed
+- any relevant Registration Watch status or alert history
+- the steps needed to reproduce the issue
+
+Do not include passwords, SIP secrets, API credentials, private keys, or other sensitive information in support requests.
+
+For suspected security vulnerabilities, do not post exploit details publicly. Contact FreePBX UK directly so the issue can be reviewed privately.
+
 ## Background Checks
 
 Registration Watch registers a FreePBX job named:
