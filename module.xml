@@ -1,27 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
 <module>
-	<rawname>registrationwatch</rawname>
-	<repo>unsupported</repo>
-	<name>Registration Watch</name>
-	<version>1.4.0</version>
-	<publisher>20tele.com</publisher>
-	<license>GPLv3+</license>
-	<licenselink>http://www.gnu.org/licenses/gpl-3.0.txt</licenselink>
-	<changelog>
-		*1.4.0* Adds the configured FreePBX System Identifier to Registration Watch email bodies so administrators can immediately see which PBX generated each alert, summary, or test message. Includes the same unknown-system fallback behaviour as Repeat Caller when the identifier cannot be read.
-		*1.3.1* Adds a per-extension Reset from Asterisk maintenance action that stops active alerting for the selected extension, rebuilds current registration rows from live Asterisk contacts, preserves extension-level watch configuration where unambiguous, and keeps historical status and alert audit data.
-		*1.3.0* Adds support for FreePBX 16 while retaining FreePBX 17 support. Widens registration notes to 72 characters when upgrading earlier Registration Watch installations.
-		*1.2.1* Focused patch release for FreePBX 17. Fixes the Registration Watch admin page expanding to desktop content width on narrow and mobile viewports because of the FreePBX page-body table layout. Wide tables continue to scroll locally. Desktop behaviour and module runtime logic are unchanged.
-		*1.2.0* Initial Registration Watch release for FreePBX 17. Adds SIP registration status visibility, status history, alert history, and email alerting for watched registrations. Sets Storm Threshold to 20 by default, with 0 available to disable it. Adds reconcile locking and auto-disables registrations that remain absent for 30 days.
-	</changelog>
-	<category>Reports</category>
-	<description>Registration Watch provides SIP registration status visibility, history, and alerting through FreePBX reconciliation jobs.</description>
-	<menuitems>
-		<registrationwatch>Registration Watch</registrationwatch>
-	</menuitems>
-	<depends>
-		<version>16.0</version>
-	</depends>
-	<supported>
-		<version>16.0</version>
-	</supported>
+  <rawname>registrationwatch</rawname>
+  <name>Registration Watch</name>
+  <version>1.4.1</version>
+  <publisher>FreePBX UK</publisher>
+  <license>GPLv3+</license>
+  <licenselink>https://www.gnu.org/licenses/gpl-3.0.txt</licenselink>
+  <category>Reports</category>
+  <description>Registration Watch provides SIP registration status visibility, history, and alerting through FreePBX reconciliation jobs.</description>
+  <more-info>https://github.com/freepbxUK/registrationwatch</more-info>
+
+  <changelog>
+    *1.4.1* First signed FreePBX UK release. Adds FreePBX module signing, updates publisher and repository metadata, and aligns project documentation and support information with the move to the FreePBX UK organisation. No functional module changes.
+    *1.4.0* Adds the configured FreePBX System Identifier to Registration Watch email bodies so administrators can immediately see which PBX generated each alert, summary, or test message. Includes the same unknown-system fallback behaviour as Repeat Caller when the identifier cannot be read.
+    *1.3.1* Adds a per-extension Reset from Asterisk maintenance action that stops active alerting for the selected extension, rebuilds current registration rows from live Asterisk contacts, preserves extension-level watch configuration where unambiguous, and keeps historical status and alert audit data.
+    *1.3.0* Adds support for FreePBX 16 while retaining FreePBX 17 support. Widens registration notes to 72 characters when upgrading earlier Registration Watch installations.
+    *1.2.1* Focused patch release for FreePBX 17. Fixes the Registration Watch admin page expanding to desktop content width on narrow and mobile viewports because of the FreePBX page-body table layout. Wide tables continue to scroll locally. Desktop behaviour and module runtime logic are unchanged.
+    *1.2.0* Initial Registration Watch release for FreePBX 17. Adds SIP registration status visibility, status history, alert history, and email alerting for watched registrations. Sets Storm Threshold to 20 by default, with 0 available to disable it. Adds reconcile locking and auto-disables registrations that remain absent for 30 days.
+  </changelog>
+
+  <menuitems>
+    <registrationwatch>Registration Watch</registrationwatch>
+  </menuitems>
+
+  <depends>
+    <version>16.0</version>
+  </depends>
+
+  <supported>
+    <version>16.0</version>
+    <version>17.0</version>
+  </supported>
 </module>

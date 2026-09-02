@@ -1,9 +1,13 @@
-# Registration Watch 1.4.0 for FreePBX 16 and 17
+# Registration Watch 1.4.1 for FreePBX 16 and 17
 
 Registration Watch (`registrationwatch`) watches PJSIP registration state in
 FreePBX/PBXact 16 and 17. It discovers configured FreePBX PJSIP devices and tracks
 their registration and contact state, recording state changes and sending email
 alerts when watched registrations become unavailable or recover.
+
+**Signed Release**
+
+Registration Watch 1.4.1 is the first signed FreePBX UK release of the module. Releases are signed with the author's developer GPG key, which is signed by the FreePBX Module Signing v2 master key, allowing FreePBX to verify module authenticity and integrity.
 
 Multiple registrations under the same extension may be tracked separately where
 Registration Watch can distinguish them from Asterisk/FreePBX contact data.
@@ -27,7 +31,7 @@ falls back to a sensible `unknown system` label instead of failing email deliver
 
 ## Release Status
 
-Registration Watch 1.4.0 is the current release for FreePBX 16 and 17.
+Registration Watch 1.4.1 is the current release for FreePBX 16 and 17.
 
 Use the `main` branch for stable releases. Development and release-candidate
 branches may contain incomplete or test-only changes.
@@ -105,7 +109,7 @@ Then run the following commands as root:
 
 ```sh
 cd /var/www/html/admin/modules
-git clone https://github.com/kierknoby/registrationwatch.git registrationwatch
+git clone https://github.com/freepbxUK/registrationwatch.git registrationwatch
 cd registrationwatch
 fwconsole ma install registrationwatch
 fwconsole chown
@@ -450,6 +454,12 @@ fwconsole reload
 ```
 
 ## Release History
+
+### 1.4.1, patch release, 2 September 2026
+
+Released by `@kierknoby, Kieran Knowles-Byrne // FreePBX UK`.
+
+This is the first signed FreePBX UK release of Registration Watch. It adds FreePBX module signing and updates publisher, repository, support, and project metadata. There are no functional module changes in this release.
 
 ### 1.4.0, minor release, 20 August 2026
 
