@@ -1,4 +1,4 @@
-# Registration Watch 1.4.1 for FreePBX 16 and 17
+# Registration Watch 1.4.2 for FreePBX 16 and 17
 
 Registration Watch (`registrationwatch`) watches PJSIP registration state in
 FreePBX/PBXact 16 and 17. It discovers configured FreePBX PJSIP devices and tracks
@@ -31,7 +31,7 @@ falls back to a sensible `unknown system` label instead of failing email deliver
 
 ## Release Status
 
-Registration Watch 1.4.1 is the current release for FreePBX 16 and 17.
+Registration Watch 1.4.2 is the current release for FreePBX 16 and 17.
 
 Use the `main` branch for stable releases. Development and release-candidate
 branches may contain incomplete or test-only changes.
@@ -136,13 +136,6 @@ Do not uninstall when updating. Uninstalling removes Registration Watch tables,
 settings, watched registrations, status history, alert history, and
 repeat-alert state.
 
-Check version before and after updating:
-
-```sh
-fwconsole ma list | grep -i registrationwatch
-grep "<version>" /var/www/html/admin/modules/registrationwatch/module.xml
-```
-
 ### Option 1: Update from an unpacked module directory
 
 Replace the module files in `/var/www/html/admin/modules/registrationwatch/`, then:
@@ -156,18 +149,13 @@ fwconsole reload
 
 ### Option 2: Update from GitHub
 
-After the first installation, fwconsole chown may cause Git to reject the module directory because it is owned by the FreePBX web user rather than root. Add the directory to Git's safe-directory list once:
+After the first installation, fwconsole chown may cause Git to reject the module directory because it is owned by the FreePBX web user rather than root. Update the module with:
 
 ```sh
 git config --global --add safe.directory /var/www/html/admin/modules/registrationwatch
-```
-
-Then update the module:
-
-```sh
 cd /var/www/html/admin/modules/registrationwatch
-git fetch origin main
-git reset --hard FETCH_HEAD
+git fetch origin
+git reset --hard origin/main
 fwconsole ma install registrationwatch
 fwconsole chown
 fwconsole reload
@@ -186,6 +174,101 @@ fwconsole reload
 
 After updating, open Reports > Registration Watch and confirm that existing watched
 registrations, settings, and history are still present.
+
+### Verify the update
+
+After any update, confirm that the installed module and its files report the
+expected version before investigating signature state or other update problems.
+
+```sh
+fwconsole ma list | grep -i registrationwatch
+grep -m1 '<version>' /var/www/html/admin/modules/registrationwatch/module.xml
+```
+
+If either command does not report the expected version, the module has not
+updated successfully. Correct the update source or module directory first, then
+rerun the update before troubleshooting signing or signature verification.
+
+### If the GitHub update did not complete
+
+If the module.xml command still reports an older version, the source update did
+not complete. An unusual dirty or local Git working-directory condition, such as
+a local file named `FETCH_HEAD`, can make `git reset --hard FETCH_HEAD`
+ambiguous. The documented procedure uses `git reset --hard origin/main` to avoid
+that ambiguity.
+
+Rerun the documented GitHub update and verify the version again. Do not proceed
+to signature troubleshooting until module.xml reports `1.4.2`.
+
+### Signature warnings after updating an older unsigned release
+
+Some existing installations upgraded from an older unsigned Registration Watch
+release may initially show a signature warning even though 1.4.2 has been
+installed.
+
+#### Module is Unsigned
+
+See [Issue #15](https://github.com/freepbxUK/registrationwatch/issues/15).
+
+First try:
+
+```sh
+fwconsole ma refreshsignatures
+fwconsole chown
+fwconsole reload
+```
+
+Then recheck Module Admin. If it still says unsigned, verify:
+
+```sh
+grep -m1 '<version>' /var/www/html/admin/modules/registrationwatch/module.xml
+ls -l /var/www/html/admin/modules/registrationwatch/module.sig
+```
+
+If the version is not `1.4.2`, this is an update problem rather than a signature
+problem.
+
+#### Signed by unknown or untrusted key
+
+See [Issue #14](https://github.com/freepbxUK/registrationwatch/issues/14).
+
+On affected upgraded systems, the Registration Watch developer public key was
+present in the Asterisk GPG keyring, but the signature made by the FreePBX Module
+Signing v2 master key on that developer key had not been imported. Check it with:
+
+```sh
+sudo -u asterisk gpg \
+  --homedir /home/asterisk/.gnupg \
+  --check-sigs DD6DC4210FD028092D4981A56079D3C0D58322EE
+```
+
+If the FreePBX Module Signing v2 master-key signature is missing, use this tested
+remediation:
+
+```sh
+grep -qxF 'keyserver-options no-self-sigs-only,no-import-clean' /home/asterisk/.gnupg/gpg.conf \
+  || echo 'keyserver-options no-self-sigs-only,no-import-clean' >> /home/asterisk/.gnupg/gpg.conf
+
+chown asterisk:asterisk /home/asterisk/.gnupg/gpg.conf
+
+curl -s "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x6079D3C0D58322EE" \
+  | sudo -u asterisk gpg --homedir /home/asterisk/.gnupg --import
+
+fwconsole ma refreshsignatures
+fwconsole chown
+fwconsole reload
+```
+
+This is a tested remediation for affected existing installations, not a normal
+installation step. Fresh signed installations tested successfully without it.
+
+Troubleshooting order:
+
+1. Confirm module.xml reports `1.4.2`.
+2. If not, fix the update first.
+3. If 1.4.2 is installed but Module Admin says Unsigned, follow Issue #15.
+4. If 1.4.2 is installed but Module Admin reports an unknown or untrusted key, follow Issue #14.
+5. Recheck Module Admin after refreshing signatures.
 
 ## Support and Feedback
 
@@ -376,12 +459,13 @@ The admin page supports narrow and mobile viewports, while wide data tables reta
 * **Registration Status Map** -- shows all discovered registrations. Supports Cards and Rows views. The Row view has sortable columns.
 * **Alert Settings** -- configures recipients, alert triggers, debounce, repeat alerts, storm threshold, and topology polling.
 * **Watched Extensions** -- lists watched registrations with extension-level monitoring toggles, repeat-alert overrides, and admin notes. Columns are sortable.
-* **Status History** -- records registration state transitions. Columns are sortable.
-* **Alert History** -- records sent and suppressed alert attempts. Columns are sortable.
+* **Status History** -- records registration state transitions. Retained history is paginated in bounded pages, with sorting across the complete retained history.
+* **Alert History** -- records sent and suppressed alert attempts. Retained history is paginated in bounded pages, with sorting across the complete retained history.
 
-Cards/Rows view choice, sort columns, sort directions, and Show limit are
-persisted using module settings rather than browser-only local storage, so they
-are remembered across browsers for the same PBX.
+Cards/Rows view choice, sort columns, and sort directions are persisted using
+module settings rather than browser-only local storage, so they are remembered
+across browsers for the same PBX. The Show limit is persisted for the
+Registration Status Map and Watched Extensions.
 
 ## Security Model
 
@@ -429,6 +513,7 @@ php -l install.php
 php -l uninstall.php
 php -l views/main.php
 php -r '$xml = simplexml_load_file("module.xml"); echo $xml ? "module.xml parsed\n" : "module.xml failed\n";'
+php tests/history_pagination_contract.php
 php tests/repeat_alerting_contract.php
 php tests/version_compatibility_contract.php
 ```
@@ -454,6 +539,12 @@ fwconsole reload
 ```
 
 ## Release History
+
+### 1.4.2, patch release, 3 September 2026
+
+Released by `@kierknoby, Kieran Knowles-Byrne // FreePBX UK`.
+
+This patch fixes Status History and Alert History pagination. History tables now report the full retained row count and page through records in bounded 25-row server-side pages. Sorting applies across the complete retained history rather than only the currently displayed rows, with page state preserved across refresh and history maintenance actions.
 
 ### 1.4.1, patch release, 2 September 2026
 

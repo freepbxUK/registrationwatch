@@ -13,7 +13,7 @@ namespace FreePBX\modules;
 class Registrationwatch implements \BMO {
 
 	/** Fallback only. Authoritative version lives in module.xml. */
-	const VERSION = '1.4.1';
+	const VERSION = '1.4.2';
 
 	const STATUS_REACHABLE = 'Reachable';
 	const STATUS_UNREACHABLE = 'Unreachable';
@@ -47,6 +47,7 @@ class Registrationwatch implements \BMO {
 	const AUTO_HANDOVER_CONFIRM_POLLS_CHURN = 3;
 	const AUTO_HANDOVER_VALIDATION_POLLS = 3;
 	const AUTO_HANDOVER_SUSPEND_RELEASE_POLLS = 3;
+	const HISTORY_PAGE_SIZE = 25;
 
 	private $settingsDefaults = [
 		'alert_enabled' => '0',
@@ -276,6 +277,7 @@ class Registrationwatch implements \BMO {
 			case 'testemail':
 			case 'gettopology':
 			case 'saveprunepolicy':
+			case 'gethistory':
 			case 'deletestatushistoryrow':
 			case 'deletealerthistoryrow':
 			case 'resetextensionfromasterisk':
@@ -321,6 +323,8 @@ class Registrationwatch implements \BMO {
 				return $this->handleGetTopology();
 			case 'saveprunepolicy':
 				return $this->handleSavePrunePolicy();
+			case 'gethistory':
+				return $this->handleGetHistory();
 			case 'deletestatushistoryrow':
 				return $this->handleDeleteStatusHistoryRow();
 			case 'deletealerthistoryrow':
@@ -334,6 +338,18 @@ class Registrationwatch implements \BMO {
 		}
 
 		return ['status' => false, 'message' => _('Unknown command')];
+	}
+
+	private function handleGetHistory(): array {
+		$historyType = isset($_REQUEST['history_type']) ? strtolower(trim((string)$_REQUEST['history_type'])) : '';
+		if ($historyType === 'status') {
+			return ['status' => true, 'statusHistory' => $this->getStatusHistory()];
+		}
+		if ($historyType === 'alert') {
+			return ['status' => true, 'alertHistory' => $this->getAlertHistory()];
+		}
+
+		return ['status' => false, 'message' => _('Unknown history table.')];
 	}
 
 	private function handleRefresh(): array {
@@ -4177,32 +4193,88 @@ class Registrationwatch implements \BMO {
 	}
 
 	private function getStatusHistory(): array {
-		$stmt = $this->db()->query(
-			'SELECT id, registration_id, registration_key, extension, from_state, to_state, source, reason, contact_uri, latency_ms, created_at
-			FROM registrationwatch_status_history
-			ORDER BY created_at DESC, id DESC
-			LIMIT 25'
+		$page = $this->getHistoryPage(
+			'registrationwatch_status_history',
+			'id, registration_id, registration_key, extension, from_state, to_state, source, reason, contact_uri, latency_ms, created_at',
+			'created_at',
+			[
+				'time' => 'created_at',
+				'extension' => 'extension',
+				'from' => 'from_state',
+				'to' => 'to_state',
+				'source' => "CASE WHEN TRIM(COALESCE(source, '')) = 'reconcile' THEN 'Asterisk' WHEN TRIM(COALESCE(source, '')) = '' THEN '-' ELSE TRIM(COALESCE(source, '')) END",
+				'reason' => "CASE TRIM(COALESCE(reason, '')) WHEN 'status_change' THEN 'Status changed' WHEN 'removed' THEN 'Contact removed' WHEN 'reminder' THEN 'Repeat alert' WHEN 'ip_address_change' THEN 'IP address change' WHEN 'ip address change' THEN 'IP address change' WHEN '' THEN '-' ELSE TRIM(COALESCE(reason, '')) END",
+				'latency' => 'latency_ms',
+			],
+			'ui_status_history_sort_key',
+			'ui_status_history_sort_dir',
+			'status_history'
 		);
 
-		$rows = $stmt ? $stmt->fetchAll(\PDO::FETCH_ASSOC) : [];
+		$rows = $page['rows'];
 		foreach ($rows as &$row) {
 			$row['source'] = $this->sourceLabel($row['source'] ?? '');
 			$row['reason'] = $this->reasonLabel($row['reason'] ?? '');
 		}
 		unset($row);
+		$page['rows'] = $rows;
 
-		return $rows;
+		return $page;
 	}
 
 	private function getAlertHistory(): array {
-		$stmt = $this->db()->query(
-			'SELECT id, registration_id, registration_key, extension, contact_uri, history_id, alert_type, status, recipient, subject, sent_at, result, error
-			FROM registrationwatch_alert_history
-			ORDER BY sent_at DESC, id DESC
-			LIMIT 25'
+		return $this->getHistoryPage(
+			'registrationwatch_alert_history',
+			'id, registration_id, registration_key, extension, contact_uri, history_id, alert_type, status, recipient, subject, sent_at, result, error',
+			'sent_at',
+			[
+				'time' => 'sent_at',
+				'extension' => 'extension',
+				'type' => 'alert_type',
+				'status' => 'status',
+				'recipient' => 'recipient',
+				'result' => 'result',
+				'error' => 'error',
+			],
+			'ui_alert_history_sort_key',
+			'ui_alert_history_sort_dir',
+			'alert_history'
 		);
+	}
 
-		return $stmt ? $stmt->fetchAll(\PDO::FETCH_ASSOC) : [];
+	private function getHistoryPage(string $table, string $columns, string $defaultColumn, array $sortColumns, string $settingKey, string $settingDir, string $requestPrefix): array {
+		$settings = $this->getAlertSettings();
+		$sortKey = isset($_REQUEST[$requestPrefix . '_sort_key']) ? (string)$_REQUEST[$requestPrefix . '_sort_key'] : (string)$settings[$settingKey];
+		$sortColumn = $sortColumns[$sortKey] ?? $defaultColumn;
+		$sortDir = isset($_REQUEST[$requestPrefix . '_sort_dir']) ? strtolower((string)$_REQUEST[$requestPrefix . '_sort_dir']) : strtolower((string)$settings[$settingDir]);
+		$sortDir = $sortDir === 'asc' ? 'ASC' : 'DESC';
+		$offsetValue = isset($_REQUEST[$requestPrefix . '_offset']) ? (string)$_REQUEST[$requestPrefix . '_offset'] : '0';
+		$offset = ctype_digit($offsetValue) ? (int)$offsetValue : 0;
+		$offset -= $offset % self::HISTORY_PAGE_SIZE;
+
+		$countStmt = $this->db()->query('SELECT COUNT(*) FROM ' . $table);
+		$total = $countStmt ? (int)$countStmt->fetchColumn() : 0;
+		if ($total === 0) {
+			$offset = 0;
+		} elseif ($offset >= $total) {
+			$offset = (int)(floor(($total - 1) / self::HISTORY_PAGE_SIZE) * self::HISTORY_PAGE_SIZE);
+		}
+
+		$stmt = $this->db()->prepare(
+			'SELECT ' . $columns . ' FROM ' . $table .
+			' ORDER BY ' . $sortColumn . ' ' . $sortDir . ', id ' . $sortDir .
+			' LIMIT :limit OFFSET :offset'
+		);
+		$stmt->bindValue(':limit', self::HISTORY_PAGE_SIZE, \PDO::PARAM_INT);
+		$stmt->bindValue(':offset', $offset, \PDO::PARAM_INT);
+		$stmt->execute();
+
+		return [
+			'rows' => $stmt->fetchAll(\PDO::FETCH_ASSOC),
+			'total' => $total,
+			'offset' => $offset,
+			'limit' => self::HISTORY_PAGE_SIZE,
+		];
 	}
 
 	private function getPruneSettings(): array {

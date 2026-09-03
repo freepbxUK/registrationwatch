@@ -221,6 +221,14 @@ body:has(.registrationwatch) #page_body {
 	margin-left: auto;
 }
 
+.registrationwatch .rw-history-pagination {
+	display: inline-flex;
+	align-items: center;
+	gap: 8px;
+	flex: 0 0 auto;
+	margin-left: auto;
+}
+
 .registrationwatch .rw-prune-confirm-wrap {
 	margin-top: 8px;
 }
