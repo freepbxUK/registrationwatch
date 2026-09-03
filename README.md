@@ -546,6 +546,8 @@ Released by `@kierknoby, Kieran Knowles-Byrne // FreePBX UK`.
 
 This patch fixes Status History and Alert History pagination. History tables now report the full retained row count and page through records in bounded 25-row server-side pages. Sorting applies across the complete retained history rather than only the currently displayed rows, with page state preserved across refresh and history maintenance actions.
 
+Also improves test-harness portability on PHP environments where gettext already provides the `_()` function.
+
 ### 1.4.1, patch release, 2 September 2026
 
 Released by `@kierknoby, Kieran Knowles-Byrne // FreePBX UK`.
