@@ -109,12 +109,12 @@ assert_true((int)$alertSorted['rows'][0]['id'] === 32, 'alert sorting must apply
 
 $_REQUEST = ['status_history_sort_key' => 'source', 'status_history_sort_dir' => 'asc', 'status_history_offset' => '0'];
 $statusBySource = $getStatusHistory->invoke($watch);
-assert_true(array_column(array_slice($statusBySource['rows'], 0, 5), 'id') === ['4', '5', '1', '3', '2'], 'status Source sorting must exactly use trimmed PHP-visible values for null, empty, mapped, and fallback values');
+assert_true(array_map('intval', array_column(array_slice($statusBySource['rows'], 0, 5), 'id')) === [4, 5, 1, 3, 2], 'status Source sorting must exactly use trimmed PHP-visible values for null, empty, mapped, and fallback values');
 assert_true(array_column(array_slice($statusBySource['rows'], 0, 5), 'source') === ['-', '-', 'Asterisk', 'aardvark_value', 'asterisk'], 'status Source fallback values containing underscores must remain unchanged and sort by that visible value');
 
 $_REQUEST = ['status_history_sort_key' => 'reason', 'status_history_sort_dir' => 'asc', 'status_history_offset' => '0'];
 $statusByReason = $getStatusHistory->invoke($watch);
-assert_true(array_column(array_slice($statusByReason['rows'], 0, 5), 'id') === ['4', '5', '2', '1', '3'], 'status Reason sorting must exactly use trimmed PHP-visible values for null, empty, mapped, and fallback values');
+assert_true(array_map('intval', array_column(array_slice($statusByReason['rows'], 0, 5), 'id')) === [4, 5, 2, 1, 3], 'status Reason sorting must exactly use trimmed PHP-visible values for null, empty, mapped, and fallback values');
 assert_true(array_column(array_slice($statusByReason['rows'], 0, 5), 'reason') === ['-', '-', 'A_fallback', 'Contact removed', 'Contact removed'], 'status Reason fallback values containing underscores must remain unchanged and sort by that visible value');
 
 $_REQUEST = ['status_history_offset' => '26'];
