@@ -111,6 +111,8 @@
 		watchedKey: 'extension', watchedDir: 'asc',
 		statusKey: 'time', statusDir: 'desc',
 		alertKey: 'time', alertDir: 'desc',
+		statusPage: { offset: 0, limit: 25, total: 0 },
+		alertPage: { offset: 0, limit: 25, total: 0 },
 		latestWatched: null, latestStatus: null, latestAlert: null
 	};
 
@@ -392,12 +394,27 @@
 		return 'rw-history-row-neutral';
 	}
 
-	function renderHistoryRows(history) {
-		rwTableSort.latestStatus = history;
-		var statusFieldMap = { time: 'created_at', extension: 'extension', from: 'from_state', to: 'to_state', source: 'source', reason: 'reason', latency: 'latency_ms' };
-		var sorted = applySortToArray(history || [], rwTableSort.statusKey, rwTableSort.statusDir, statusFieldMap);
+	function historyPage(page) {
+		return page && $.isArray(page.rows) ? page : { rows: [], total: 0, offset: 0, limit: 25 };
+	}
+
+	function updateHistoryPagination(type, page) {
+		var stateKey = type === 'status' ? 'statusPage' : 'alertPage';
+		var $pagination = $('.rw-history-pagination[data-history-type="' + type + '"]');
+		var start = page.total > 0 ? page.offset + 1 : 0;
+		var end = page.total > 0 ? Math.min(page.offset + page.rows.length, page.total) : 0;
+		rwTableSort[stateKey] = { offset: page.offset, limit: page.limit, total: page.total };
+		$pagination.attr('data-offset', page.offset).attr('data-limit', page.limit).attr('data-total', page.total);
+		$pagination.find('.rw-history-page-count').text('Showing ' + start + ' to ' + end + ' of ' + page.total);
+		$pagination.find('.rw-history-page-prev').prop('disabled', page.offset <= 0);
+		$pagination.find('.rw-history-page-next').prop('disabled', page.offset + page.limit >= page.total);
+	}
+
+	function renderHistoryRows(page) {
+		page = historyPage(page);
+		rwTableSort.latestStatus = page;
 		var rows = [];
-		$.each(sorted, function (_, entry) {
+		$.each(page.rows, function (_, entry) {
 			var latency = entry.latency_ms ? escapeHtml(entry.latency_ms) + ' ms' : '-';
 			var id = parseInt(entry.id, 10) || 0;
 			rows.push(
@@ -417,6 +434,7 @@
 		$('.rw-history tbody').html(rows.join(''));
 		$('.rw-history-empty').toggle(rows.length === 0);
 		$('.rw-history-wrap').toggle(rows.length > 0);
+		updateHistoryPagination('status', page);
 		updateSortHeaders('.rw-history', rwTableSort.statusKey, rwTableSort.statusDir);
 		$(document).trigger('registrationwatch:history-rendered');
 	}
@@ -432,12 +450,11 @@
 		return 'rw-alert-history-row-neutral';
 	}
 
-	function renderAlertHistoryRows(history) {
-		rwTableSort.latestAlert = history;
-		var alertFieldMap = { time: 'sent_at', extension: 'extension', type: 'alert_type', status: 'status', recipient: 'recipient', result: 'result', error: 'error' };
-		var sorted = applySortToArray(history || [], rwTableSort.alertKey, rwTableSort.alertDir, alertFieldMap);
+	function renderAlertHistoryRows(page) {
+		page = historyPage(page);
+		rwTableSort.latestAlert = page;
 		var rows = [];
-		$.each(sorted, function (_, entry) {
+		$.each(page.rows, function (_, entry) {
 			var id = parseInt(entry.id, 10) || 0;
 			rows.push(
 				'<tr data-history-id="' + id + '" class="' + alertHistoryRowClass(entry.alert_type) + '">' +
@@ -456,6 +473,7 @@
 		$('.rw-alert-history tbody').html(rows.join(''));
 		$('.rw-alert-history-empty').toggle(rows.length === 0);
 		$('.rw-alert-history-wrap').toggle(rows.length > 0);
+		updateHistoryPagination('alert', page);
 		updateSortHeaders('.rw-alert-history', rwTableSort.alertKey, rwTableSort.alertDir);
 		$(document).trigger('registrationwatch:history-rendered');
 	}
@@ -626,7 +644,7 @@
 			rwTableSort.statusKey = key;
 			window.rwSaveUiSetting('ui_status_history_sort_key', rwTableSort.statusKey);
 			window.rwSaveUiSetting('ui_status_history_sort_dir', rwTableSort.statusDir);
-			if (rwTableSort.latestStatus) { renderHistoryRows(rwTableSort.latestStatus); }
+			loadHistoryPage('status', 0);
 		});
 
 		$(document).on('click', '.rw-alert-history thead th[data-sort-key]', function () {
@@ -635,7 +653,7 @@
 			rwTableSort.alertKey = key;
 			window.rwSaveUiSetting('ui_alert_history_sort_key', rwTableSort.alertKey);
 			window.rwSaveUiSetting('ui_alert_history_sort_dir', rwTableSort.alertDir);
-			if (rwTableSort.latestAlert) { renderAlertHistoryRows(rwTableSort.latestAlert); }
+			loadHistoryPage('alert', 0);
 		});
 
 		var root = $('.registrationwatch');
@@ -645,6 +663,51 @@
 		var refreshInFlight = false;
 		var refreshTimer = null;
 		var resetTargetRegistrationId = 0;
+
+		function historyRequestData() {
+			return {
+				status_history_offset: rwTableSort.statusPage.offset,
+				status_history_sort_key: rwTableSort.statusKey,
+				status_history_sort_dir: rwTableSort.statusDir,
+				alert_history_offset: rwTableSort.alertPage.offset,
+				alert_history_sort_key: rwTableSort.alertKey,
+				alert_history_sort_dir: rwTableSort.alertDir
+			};
+		}
+
+		function loadHistoryPage(type, offset) {
+			var token = registrationWatchToken(root);
+			var isStatus = type === 'status';
+			var data = historyRequestData();
+			data.command = 'gethistory';
+			data.history_type = type;
+			data.token = token;
+			data[type + '_history_offset'] = Math.max(0, offset);
+			if (!token) {
+				showMessage('Security token unavailable. Please reload the page and try again.', 'error');
+				return;
+			}
+			$.ajax({
+				url: 'ajax.php?module=registrationwatch', method: 'POST', dataType: 'json', data: data
+			}).done(function (response) {
+				if (!response || !response.status) {
+					showMessage(response && response.message ? response.message : 'Unable to load history.', 'error');
+					return;
+				}
+				if (isStatus) { renderHistoryRows(response.statusHistory); }
+				else { renderAlertHistoryRows(response.alertHistory); }
+			}).fail(function () {
+				showMessage('Unable to load history.', 'error');
+			});
+		}
+
+		root.on('click', '.rw-history-page-prev, .rw-history-page-next', function () {
+			var pagination = $(this).closest('.rw-history-pagination');
+			var type = pagination.data('history-type');
+			var page = type === 'status' ? rwTableSort.statusPage : rwTableSort.alertPage;
+			var offset = $(this).hasClass('rw-history-page-next') ? page.offset + page.limit : page.offset - page.limit;
+			loadHistoryPage(type, offset);
+		});
 
 		function getPollInterval() {
 			return parseInt(root.attr('data-poll-interval'), 10) || 0;
@@ -794,10 +857,10 @@
 				url: 'ajax.php?module=registrationwatch',
 				method: 'POST',
 				dataType: 'json',
-				data: {
+				data: $.extend({
 					command: isAutomatic ? 'gettopology' : 'refresh',
 					token: token
-				}
+				}, historyRequestData())
 			}).done(function (response) {
 				rwLog('refreshStatus done | isAutomatic =', isAutomatic, '| activeElement =', document.activeElement);
 				if (!response || !response.status) {
@@ -977,11 +1040,11 @@
 				url: 'ajax.php?module=registrationwatch',
 				method: 'POST',
 				dataType: 'json',
-				data: {
+				data: $.extend({
 					command: 'resetextensionfromasterisk',
 					registration_id: resetTargetRegistrationId,
 					token: token
-				}
+				}, historyRequestData())
 			}).done(function (response) {
 				if (!response || !response.status) {
 					showMessage(response && response.message ? response.message : 'Unable to reset registration state from Asterisk.', 'error');
@@ -1119,10 +1182,10 @@
 				url: 'ajax.php?module=registrationwatch',
 				method: 'POST',
 				dataType: 'json',
-				data: {
+				data: $.extend({
 					command: 'testemail',
 					token: token
-				}
+				}, historyRequestData())
 			}).done(function (response) {
 				if (!response || !response.status) {
 					showMessage(response && response.message ? response.message : 'Unable to send test email.', 'error');
@@ -1208,13 +1271,13 @@
 				url: 'ajax.php?module=registrationwatch',
 				method: 'POST',
 				dataType: 'json',
-				data: {
+				data: $.extend({
 					command: 'saveprunepolicy',
 					history_type: historyType,
 					policy: policy,
 					confirmed: confirmed,
 					token: token
-				}
+				}, historyRequestData())
 			}).done(function (response) {
 				if (!response || !response.status) {
 					showMessage(response && response.message ? response.message : 'Unable to save pruning policy.', 'error');
@@ -1263,12 +1326,12 @@
 				url: 'ajax.php?module=registrationwatch',
 				method: 'POST',
 				dataType: 'json',
-				data: {
+				data: $.extend({
 					command: 'deletestatushistoryrow',
 					id: id,
 					confirmed: 1,
 					token: token
-				}
+				}, historyRequestData())
 			}).done(function (response) {
 				if (!response || !response.status) {
 					showMessage(response && response.message ? response.message : 'Unable to delete Status History row.', 'error');
@@ -1303,12 +1366,12 @@
 				url: 'ajax.php?module=registrationwatch',
 				method: 'POST',
 				dataType: 'json',
-				data: {
+				data: $.extend({
 					command: 'deletealerthistoryrow',
 					id: id,
 					confirmed: 1,
 					token: token
-				}
+				}, historyRequestData())
 			}).done(function (response) {
 				if (!response || !response.status) {
 					showMessage(response && response.message ? response.message : 'Unable to delete Alert History row.', 'error');
@@ -1471,10 +1534,8 @@
 
 	        function installTableControls() {
 	                [
-	                        ['watched', 'Watched Extensions'],
-	                        ['status-history', 'Status History'],
-	                        ['alert-history', 'Alert History']
-                ].forEach(function(item) {
+	                        ['watched', 'Watched Extensions']
+	                ].forEach(function(item) {
                         var section = item[0];
                         var title = item[1];
                         var $panel = panelByTitle(title);
@@ -1524,7 +1585,7 @@
         }
 
         function applyAllLimits(triggerMapChange) {
-                ['Watched Extensions', 'Status History', 'Alert History'].forEach(function(title) {
+	                ['Watched Extensions'].forEach(function(title) {
                         var $panel = panelByTitle(title);
                         if ($panel.length) {
                                 applyTableLimit($panel);

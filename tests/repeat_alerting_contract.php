@@ -4,8 +4,10 @@ declare(strict_types=1);
 
 interface BMO {}
 
-function _($text) {
-	return $text;
+if (!function_exists('_')) {
+	function _($text) {
+		return $text;
+	}
 }
 
 function assert_true(bool $condition, string $message): void {

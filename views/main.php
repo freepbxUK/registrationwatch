@@ -21,10 +21,18 @@ if (!defined('FREEPBX_IS_AUTH')) {
 
 $registrations = isset($registrations) && is_array($registrations) ? $registrations : [];
 $watchedExtensions = isset($watchedExtensions) && is_array($watchedExtensions) ? $watchedExtensions : [];
-$statusHistory = isset($statusHistory) && is_array($statusHistory) ? $statusHistory : [];
+$statusHistoryPage = isset($statusHistory) && is_array($statusHistory) ? $statusHistory : [];
+$statusHistory = isset($statusHistoryPage['rows']) && is_array($statusHistoryPage['rows']) ? $statusHistoryPage['rows'] : [];
+$statusHistoryTotal = isset($statusHistoryPage['total']) ? (int)$statusHistoryPage['total'] : count($statusHistory);
+$statusHistoryOffset = isset($statusHistoryPage['offset']) ? (int)$statusHistoryPage['offset'] : 0;
+$statusHistoryLimit = isset($statusHistoryPage['limit']) ? (int)$statusHistoryPage['limit'] : 25;
 $alertSettings = isset($alertSettings) && is_array($alertSettings) ? $alertSettings : [];
 $pruneSettings = isset($pruneSettings) && is_array($pruneSettings) ? $pruneSettings : [];
-$alertHistory = isset($alertHistory) && is_array($alertHistory) ? $alertHistory : [];
+$alertHistoryPage = isset($alertHistory) && is_array($alertHistory) ? $alertHistory : [];
+$alertHistory = isset($alertHistoryPage['rows']) && is_array($alertHistoryPage['rows']) ? $alertHistoryPage['rows'] : [];
+$alertHistoryTotal = isset($alertHistoryPage['total']) ? (int)$alertHistoryPage['total'] : count($alertHistory);
+$alertHistoryOffset = isset($alertHistoryPage['offset']) ? (int)$alertHistoryPage['offset'] : 0;
+$alertHistoryLimit = isset($alertHistoryPage['limit']) ? (int)$alertHistoryPage['limit'] : 25;
 $mapRegistrations = array_values(array_filter($registrations, function ($registration) {
 	return isset($registration['discovered']) && (int)$registration['discovered'] === 1;
 }));
@@ -568,7 +576,11 @@ $_rwAssetVer = max(
 									<?php echo _('I understand this will permanently delete older Status History rows.'); ?>
 								</label>
 							</div>
-							<div class="rw-history-show-slot" data-show-section="status-history"></div>
+							<div class="rw-history-pagination" data-history-type="status" data-offset="<?php echo $statusHistoryOffset; ?>" data-limit="<?php echo $statusHistoryLimit; ?>" data-total="<?php echo $statusHistoryTotal; ?>">
+								<button type="button" class="btn btn-default btn-sm rw-history-page-prev" title="<?php echo _('Previous Status History page'); ?>" aria-label="<?php echo _('Previous Status History page'); ?>"<?php echo $statusHistoryOffset <= 0 ? ' disabled' : ''; ?>><i class="fa fa-chevron-left"></i></button>
+								<span class="text-muted rw-history-page-count"><?php echo $statusHistoryTotal > 0 ? sprintf(_('Showing %d to %d of %d'), $statusHistoryOffset + 1, min($statusHistoryOffset + count($statusHistory), $statusHistoryTotal), $statusHistoryTotal) : _('Showing 0 to 0 of 0'); ?></span>
+								<button type="button" class="btn btn-default btn-sm rw-history-page-next" title="<?php echo _('Next Status History page'); ?>" aria-label="<?php echo _('Next Status History page'); ?>"<?php echo $statusHistoryOffset + $statusHistoryLimit >= $statusHistoryTotal ? ' disabled' : ''; ?>><i class="fa fa-chevron-right"></i></button>
+							</div>
 						</div>
 						<?php if (empty($statusHistory)): ?>
 							<p class="rw-placeholder rw-history-empty"><?php echo _('No status transitions have been recorded yet.'); ?></p>
@@ -639,7 +651,11 @@ $_rwAssetVer = max(
 									<?php echo _('I understand this will permanently delete older Alert History rows.'); ?>
 								</label>
 							</div>
-							<div class="rw-history-show-slot" data-show-section="alert-history"></div>
+							<div class="rw-history-pagination" data-history-type="alert" data-offset="<?php echo $alertHistoryOffset; ?>" data-limit="<?php echo $alertHistoryLimit; ?>" data-total="<?php echo $alertHistoryTotal; ?>">
+								<button type="button" class="btn btn-default btn-sm rw-history-page-prev" title="<?php echo _('Previous Alert History page'); ?>" aria-label="<?php echo _('Previous Alert History page'); ?>"<?php echo $alertHistoryOffset <= 0 ? ' disabled' : ''; ?>><i class="fa fa-chevron-left"></i></button>
+								<span class="text-muted rw-history-page-count"><?php echo $alertHistoryTotal > 0 ? sprintf(_('Showing %d to %d of %d'), $alertHistoryOffset + 1, min($alertHistoryOffset + count($alertHistory), $alertHistoryTotal), $alertHistoryTotal) : _('Showing 0 to 0 of 0'); ?></span>
+								<button type="button" class="btn btn-default btn-sm rw-history-page-next" title="<?php echo _('Next Alert History page'); ?>" aria-label="<?php echo _('Next Alert History page'); ?>"<?php echo $alertHistoryOffset + $alertHistoryLimit >= $alertHistoryTotal ? ' disabled' : ''; ?>><i class="fa fa-chevron-right"></i></button>
+							</div>
 						</div>
 						<?php if (empty($alertHistory)): ?>
 							<p class="rw-placeholder rw-alert-history-empty"><?php echo _('No alert attempts have been recorded yet.'); ?></p>
