@@ -70,6 +70,7 @@ Place the `registrationwatch` directory in `/var/www/html/admin/modules/`, then:
 ```sh
 cd /var/www/html/admin/modules/registrationwatch
 fwconsole ma install registrationwatch
+cd
 fwconsole chown
 fwconsole reload
 ```
@@ -108,10 +109,12 @@ apt install -y git
 Then run the following commands as root:
 
 ```sh
+cd
 cd /var/www/html/admin/modules
 git clone https://github.com/freepbxUK/registrationwatch.git registrationwatch
-cd registrationwatch
+cd /var/www/html/admin/modules/registrationwatch
 fwconsole ma install registrationwatch
+cd
 fwconsole chown
 fwconsole reload
 ```
@@ -124,6 +127,7 @@ Copy or symlink a local `registrationwatch` directory into
 ```sh
 cd /var/www/html/admin/modules/registrationwatch
 fwconsole ma install registrationwatch
+cd
 fwconsole chown
 fwconsole reload
 ```
@@ -143,20 +147,26 @@ Replace the module files in `/var/www/html/admin/modules/registrationwatch/`, th
 ```sh
 cd /var/www/html/admin/modules/registrationwatch
 fwconsole ma install registrationwatch
+cd
 fwconsole chown
 fwconsole reload
 ```
 
 ### Option 2: Update from GitHub
 
-After the first installation, fwconsole chown may cause Git to reject the module directory because it is owned by the FreePBX web user rather than root. Update the module with:
+After the first installation, fwconsole chown may cause Git to reject the module directory because it is owned by the FreePBX web user rather than root. Run the following commands as root:
 
 ```sh
-git config --global --add safe.directory /var/www/html/admin/modules/registrationwatch
+cd
+
+git config --global --get-all safe.directory | grep -Fxq '/var/www/html/admin/modules/registrationwatch' \
+  || git config --global --add safe.directory /var/www/html/admin/modules/registrationwatch
+
 cd /var/www/html/admin/modules/registrationwatch
 git fetch origin
 git reset --hard origin/main
 fwconsole ma install registrationwatch
+cd
 fwconsole chown
 fwconsole reload
 ```
@@ -168,6 +178,7 @@ Re-copy or re-link your local `registrationwatch` directory, then:
 ```sh
 cd /var/www/html/admin/modules/registrationwatch
 fwconsole ma install registrationwatch
+cd
 fwconsole chown
 fwconsole reload
 ```
@@ -210,6 +221,7 @@ configuration condition, not a Registration Watch runtime failure.
 Inspect the configured refspecs with:
 
 ```sh
+cd /var/www/html/admin/modules/registrationwatch
 git config --get-all remote.origin.fetch
 ```
 
@@ -237,14 +249,17 @@ git branch -r
 Confirm that `origin/main` is present:
 
 ```sh
+cd /var/www/html/admin/modules/registrationwatch
 git branch -r
 ```
 
 Then rerun the normal stable update:
 
 ```sh
+cd /var/www/html/admin/modules/registrationwatch
 git reset --hard origin/main
 fwconsole ma install registrationwatch
+cd
 fwconsole chown
 fwconsole reload
 ```
@@ -566,6 +581,7 @@ Granular FreePBX ACL integration is still future work.
 Useful local checks:
 
 ```sh
+cd /var/www/html/admin/modules/registrationwatch
 php -l Registrationwatch.class.php
 php -l Job.php
 php -l page.registrationwatch.php
