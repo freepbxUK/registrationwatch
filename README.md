@@ -200,6 +200,64 @@ that ambiguity.
 Rerun the documented GitHub update and verify the version again. Do not proceed
 to signature troubleshooting until module.xml reports `1.4.2`.
 
+#### `git fetch origin` cannot find a remote branch
+
+If `git fetch origin` fails with `fatal: Couldn't find remote ref refs/heads/...`,
+an older local checkout may have `remote.origin.fetch` pinned to an obsolete
+development branch that no longer exists. This is a local Git checkout
+configuration condition, not a Registration Watch runtime failure.
+
+Inspect the configured refspecs with:
+
+```sh
+git config --get-all remote.origin.fetch
+```
+
+A normal Registration Watch checkout uses:
+
+```text
++refs/heads/*:refs/remotes/origin/*
+```
+
+If the fetch configuration points to an obsolete branch, repair it with:
+
+```sh
+cd /var/www/html/admin/modules/registrationwatch
+
+git remote set-url origin https://github.com/freepbxUK/registrationwatch.git
+
+git config --unset-all remote.origin.fetch
+git config --add remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'
+
+git fetch --prune origin
+
+git branch -r
+```
+
+Confirm that `origin/main` is present:
+
+```sh
+git branch -r
+```
+
+Then rerun the normal stable update:
+
+```sh
+git reset --hard origin/main
+fwconsole ma install registrationwatch
+fwconsole chown
+fwconsole reload
+```
+
+If `git fetch origin` fails, fix the Git checkout before running `fwconsole ma
+install`; otherwise it will install whatever older module files are already on
+disk. Then verify the installed version again:
+
+```sh
+fwconsole ma list | grep -i registrationwatch
+grep -m1 '<version>' /var/www/html/admin/modules/registrationwatch/module.xml
+```
+
 ### Signature warnings after updating an older unsigned release
 
 Some existing installations upgraded from an older unsigned Registration Watch
@@ -264,11 +322,13 @@ installation step. Fresh signed installations tested successfully without it.
 
 Troubleshooting order:
 
-1. Confirm module.xml reports `1.4.2`.
-2. If not, fix the update first.
-3. If 1.4.2 is installed but Module Admin says Unsigned, follow Issue #15.
-4. If 1.4.2 is installed but Module Admin reports an unknown or untrusted key, follow Issue #14.
-5. Recheck Module Admin after refreshing signatures.
+1. Verify the installed/module.xml version.
+2. If the version is old, check whether the Git source update actually completed.
+3. If `git fetch origin` fails because an obsolete remote branch is configured, repair the origin fetch configuration and rerun the update.
+4. Only once the expected version is installed should signature troubleshooting begin.
+5. If Module Admin says Unsigned, follow Issue #15.
+6. If Module Admin reports an unknown or untrusted key, follow Issue #14.
+7. Recheck Module Admin after refreshing signatures.
 
 ## Support and Feedback
 
