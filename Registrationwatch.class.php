@@ -1031,7 +1031,7 @@ class Registrationwatch implements \BMO {
 				return ['status' => false, 'message' => _('Confirm the selected Status History row deletion.')];
 			}
 
-			$stmt = $this->db()->prepare('DELETE FROM registrationwatch_status_history WHERE id = :id LIMIT 1');
+			$stmt = $this->db()->prepare('DELETE FROM registrationwatch_status_history WHERE id = :id');
 			$stmt->execute([':id' => $id]);
 			$deleted = $stmt->rowCount();
 
@@ -1054,7 +1054,7 @@ class Registrationwatch implements \BMO {
 				return ['status' => false, 'message' => _('Confirm the selected Alert History row deletion.')];
 			}
 
-			$stmt = $this->db()->prepare('DELETE FROM registrationwatch_alert_history WHERE id = :id LIMIT 1');
+			$stmt = $this->db()->prepare('DELETE FROM registrationwatch_alert_history WHERE id = :id');
 			$stmt->execute([':id' => $id]);
 			$deleted = $stmt->rowCount();
 
