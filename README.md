@@ -591,6 +591,7 @@ php -l views/main.php
 php -r '$xml = simplexml_load_file("module.xml"); echo $xml ? "module.xml parsed\n" : "module.xml failed\n";'
 php tests/history_pagination_contract.php
 php tests/repeat_alerting_contract.php
+php tests/reset_from_asterisk_contract.php
 php tests/version_compatibility_contract.php
 ```
 
