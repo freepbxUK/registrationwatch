@@ -13,7 +13,7 @@ namespace FreePBX\modules;
 class Registrationwatch implements \BMO {
 
 	/** Fallback only. Authoritative version lives in module.xml. */
-	const VERSION = '1.4.3';
+	const VERSION = '1.4.4';
 
 	const STATUS_REACHABLE = 'Reachable';
 	const STATUS_UNREACHABLE = 'Unreachable';
@@ -3302,92 +3302,146 @@ class Registrationwatch implements \BMO {
 
 		try {
 			$debounceSeconds = min(self::ALERT_TIMING_MAX_SECONDS, max(0, (int)$settings['debounce_seconds']));
-			$cutoff = date('Y-m-d H:i:s', strtotime($now) - $debounceSeconds);
-			// Alerts are allowed only for fresh eligible registration transitions.
-			// Freshness is measured using the configured debounce delay plus
-			// ALERT_STALE_TRANSITION_MAX_SECONDS. This prevents old status-history rows
-			// being replayed later after recipient or settings changes, while still
-			// allowing legitimate debounce-delayed alerts to fire.
 			$staleCutoff = date('Y-m-d H:i:s', strtotime($now) - ($debounceSeconds + self::ALERT_STALE_TRANSITION_MAX_SECONDS));
-			$stmt = $this->db()->prepare(
-				'SELECT h.id, h.registration_id, h.registration_key, h.extension, h.from_state, h.to_state, h.source, h.reason,
-					h.contact_uri, h.latency_ms, h.created_at, e.repeat_mode
+			$candidateStmt = $this->db()->prepare(
+				'SELECT DISTINCT h.registration_id
 				FROM registrationwatch_status_history h
 				JOIN registrationwatch_registrations e
 					ON e.id = h.registration_id
 				WHERE h.source = :source
-					AND h.created_at <= :cutoff
 					AND h.created_at >= :stale_cutoff
+					AND h.created_at <= :now
 					AND e.enabled = 1
-				ORDER BY h.created_at ASC, h.id ASC
-				LIMIT 100'
+				ORDER BY h.registration_id ASC'
 			);
-			$stmt->execute([
+			$candidateStmt->execute([
 				':source' => 'reconcile',
-				':cutoff' => $cutoff,
 				':stale_cutoff' => $staleCutoff,
+				':now' => $now,
 			]);
+			$registrationIds = array_values(array_unique(array_map('intval', $candidateStmt->fetchAll(\PDO::FETCH_COLUMN))));
 
-			foreach ($stmt->fetchAll(\PDO::FETCH_ASSOC) as $transition) {
-				if ($this->isRecoveryTransition($transition)) {
-					$this->resetEscalationForRecovery($transition);
+			foreach (array_chunk($registrationIds, 100) as $candidateRegistrationIds) {
+				$placeholders = [];
+				$params = [':source' => 'reconcile'];
+				foreach ($candidateRegistrationIds as $index => $registrationId) {
+					$key = ':registration_id_' . $index;
+					$placeholders[] = $key;
+					$params[$key] = $registrationId;
 				}
 
-				$alertType = $this->alertTypeForTransition($transition, $settings);
-				if ($alertType === null) {
-					continue;
+				$historyStmt = $this->db()->prepare(
+					'SELECT h.id, h.registration_id, h.registration_key, h.extension, h.from_state, h.to_state, h.source, h.reason,
+						h.contact_uri, h.latency_ms, h.created_at, e.repeat_mode
+					FROM registrationwatch_status_history h
+					JOIN registrationwatch_registrations e
+						ON e.id = h.registration_id
+					WHERE h.source = :source
+						AND h.registration_id IN (' . implode(', ', $placeholders) . ')
+						AND (
+							h.created_at >= :history_cutoff AND h.created_at <= :now
+							OR h.id = (
+								SELECT prior.id
+								FROM registrationwatch_status_history prior
+								WHERE prior.registration_id = h.registration_id
+									AND prior.source = :prior_source
+									AND prior.created_at < :prior_cutoff
+									AND prior.to_state IN (:prior_to_unreachable, :prior_to_not_registered)
+									AND (prior.from_state IS NULL OR prior.from_state NOT IN (:prior_from_unreachable, :prior_from_not_registered))
+								ORDER BY prior.created_at DESC, prior.id DESC
+								LIMIT 1
+							)
+						)
+						AND e.enabled = 1
+					ORDER BY h.registration_id ASC, h.created_at ASC, h.id ASC'
+				);
+				$params[':history_cutoff'] = $staleCutoff;
+				$params[':now'] = $now;
+				$params[':prior_source'] = 'reconcile';
+				$params[':prior_cutoff'] = $staleCutoff;
+				$params[':prior_to_unreachable'] = self::STATUS_UNREACHABLE;
+				$params[':prior_to_not_registered'] = self::STATUS_NOT_REGISTERED;
+				$params[':prior_from_unreachable'] = self::STATUS_UNREACHABLE;
+				$params[':prior_from_not_registered'] = self::STATUS_NOT_REGISTERED;
+				$historyStmt->execute($params);
+
+				$transitionsByRegistration = [];
+				foreach ($historyStmt->fetchAll(\PDO::FETCH_ASSOC) as $transition) {
+					$transitionsByRegistration[(int)$transition['registration_id']][] = $transition;
 				}
 
-				$repeatMode = $this->resolveRepeatMode($transition['repeat_mode'] ?? null, $settings);
-				if ($this->isEscalatingAlertType($alertType)) {
-					$existingEscalation = $this->getActiveEscalationForRegistration((int)$transition['registration_id']);
-					$this->deleteOtherEscalations((int)$transition['registration_id'], $alertType);
-					$this->upsertEscalationForTransition($transition, $alertType, $repeatMode, $now, $existingEscalation);
-				}
+				foreach ($transitionsByRegistration as $transitions) {
+					$incident = null;
+					foreach ($transitions as $transition) {
+						$from = $this->normaliseState($transition['from_state'] ?? '');
+						$to = $this->normaliseState($transition['to_state'] ?? '');
+						$fromUnhealthy = $this->isUnhealthyState($from);
+						$toUnhealthy = $this->isUnhealthyState($to);
 
-				if (!$canSend) {
-					continue;
-				}
+						if (!$fromUnhealthy && $toUnhealthy) {
+							$incident = [
+								'start' => $transition,
+								'start_is_alertable' => $this->hadRegisteredState($from) && !$fromUnhealthy,
+								'problem_transition' => null,
+								'problem_transitions' => [],
+							];
+						} elseif ($fromUnhealthy && $toUnhealthy && $incident === null) {
+							$incident = [
+								'start' => $transition,
+								'start_is_alertable' => false,
+								'problem_transition' => null,
+								'problem_transitions' => [],
+							];
+						}
 
-				foreach ($recipients as $recipient) {
-					if ($this->hasRecordedAlertForRecipient((int)$transition['id'], $alertType, $recipient)) {
-						continue;
+						if ($toUnhealthy && $incident !== null) {
+							$alertType = $this->alertTypeForTransition($transition, $settings);
+							if ($this->isEscalatingAlertType((string)$alertType)) {
+								if (empty($incident['start_is_alertable'])) {
+									$incident['start'] = $transition;
+									$incident['start_is_alertable'] = true;
+									$incident['problem_transitions'] = [];
+								}
+								$incident['problem_transition'] = $transition;
+								$incident['problem_alert_type'] = $alertType;
+								$incident['problem_transitions'][] = $transition;
+							}
+						}
+
+						if ($fromUnhealthy && !$toUnhealthy) {
+							if ($incident !== null) {
+								$this->processAlertIncident(
+									$incident,
+									$transition,
+									$debounceSeconds,
+									$staleCutoff,
+									$now,
+									$settings,
+									$recipients,
+									$canSend,
+									$collectedAlerts
+								);
+							}
+							if ($this->isRecoveryTransition($transition)) {
+								$this->resetEscalationForRecovery($transition);
+							}
+							$incident = null;
+						}
 					}
 
-					$email = $this->buildAlertEmail($transition, $alertType);
-					$reserved = $this->reserveAlertHistory([
-						'registration_id' => (int)$transition['registration_id'],
-						'registration_key' => $transition['registration_key'],
-						'extension' => $transition['extension'],
-						'history_id' => (int)$transition['id'],
-						'alert_type' => $alertType,
-						'status' => $transition['to_state'],
-						'contact_uri' => $transition['contact_uri'] ?? null,
-						'recipient' => $recipient,
-						'subject' => $email['subject'],
-						'message' => $email['message'],
-						'sent_at' => $now,
-						'result' => 'pending',
-						'error' => null,
-					]);
-					if (!$reserved) {
-						continue;
+					if ($incident !== null) {
+						$this->processAlertIncident(
+							$incident,
+							null,
+							$debounceSeconds,
+							$staleCutoff,
+							$now,
+							$settings,
+							$recipients,
+							$canSend,
+							$collectedAlerts
+						);
 					}
-
-					$collectedAlerts[] = [
-						'registration_id' => (int)$transition['registration_id'],
-						'registration_key' => (string)$transition['registration_key'],
-						'extension' => (string)$transition['extension'],
-						'history_id' => (int)$transition['id'],
-						'reminder_n' => 0,
-						'alert_type' => $alertType,
-						'status' => (string)$transition['to_state'],
-						'contact_uri' => $transition['contact_uri'] ?? null,
-						'recipient' => $recipient,
-						'subject' => $email['subject'],
-						'message' => $email['message'],
-						'source' => 'transition',
-					];
 				}
 			}
 
@@ -3440,7 +3494,6 @@ class Registrationwatch implements \BMO {
 	private function isRecoveryTransition(array $transition): bool {
 		$from = $this->normaliseState($transition['from_state'] ?? '');
 		$to = $this->normaliseState($transition['to_state'] ?? '');
-
 		return in_array($from, [
 			self::STATUS_UNREACHABLE,
 			self::STATUS_NOT_REGISTERED,
@@ -3483,8 +3536,10 @@ class Registrationwatch implements \BMO {
 		$stmt = $this->db()->prepare(
 			'DELETE FROM registrationwatch_alert_escalation
 			WHERE registration_id = :registration_id
-				AND alert_type IN (' . implode(', ', $placeholders) . ')'
+				AND alert_type IN (' . implode(', ', $placeholders) . ')
+				AND history_id <= :recovery_history_id'
 		);
+		$params[':recovery_history_id'] = (int)$transition['id'];
 		$stmt->execute($params);
 	}
 
@@ -3707,7 +3762,19 @@ class Registrationwatch implements \BMO {
 
 		$threshold = $this->stormThreshold($settings);
 		if ($threshold > 0 && count($alerts) >= $threshold) {
-			$summaryResults = $this->dispatchStormSummary($alerts, $recipients, $now);
+			$summaryResults = [];
+			foreach ($recipients as $recipient) {
+				$recipientAlerts = array_values(array_filter($alerts, function (array $alert) use ($recipient): bool {
+					return (string)$alert['recipient'] === (string)$recipient;
+				}));
+				if (!$recipientAlerts) {
+					continue;
+				}
+
+				$recipientSummaryResult = $this->dispatchStormSummary($recipientAlerts, [$recipient], $now);
+				$summaryResults[$recipient] = $recipientSummaryResult[$recipient] ?? ['status' => false, 'message' => 'Storm summary was not attempted for this recipient.'];
+			}
+
 			foreach ($alerts as $alert) {
 				$recipient = (string)$alert['recipient'];
 				$summaryResult = $summaryResults[$recipient] ?? ['status' => false, 'message' => 'Storm summary was not attempted for this recipient.'];
@@ -3852,6 +3919,241 @@ class Registrationwatch implements \BMO {
 		foreach ($reminderCycles as $cycle) {
 			$this->markReminderCycleComplete($cycle['row'], (int)$cycle['reminder_n'], $now);
 		}
+	}
+
+	private function processAlertIncident(array $incident, ?array $recovery, int $debounceSeconds, string $staleCutoff, string $now, array $settings, array $recipients, bool $canSend, array &$collectedAlerts): void {
+		$start = $incident['start'];
+		$problemTransitions = $incident['problem_transitions'] ?? [];
+		$problemTransition = $problemTransitions
+			? $problemTransitions[count($problemTransitions) - 1]
+			: ($incident['problem_transition'] ?? null);
+		$problemAlertType = $incident['problem_alert_type'] ?? null;
+		$startId = (int)$start['id'];
+		$registrationId = (int)$start['registration_id'];
+		$endId = $recovery !== null ? (int)$recovery['id'] : (int)($problemTransition['id'] ?? $startId);
+		$startTs = strtotime((string)$start['created_at']);
+		$problemTransitionTs = strtotime((string)($problemTransition['created_at'] ?? ''));
+		$nowTs = strtotime($now);
+		$staleCutoffTs = strtotime($staleCutoff);
+		$finishTs = $recovery !== null ? strtotime((string)$recovery['created_at']) : $nowTs;
+		$hasAlertableProblem = !empty($incident['start_is_alertable'])
+			&& is_array($problemTransition)
+			&& $this->isEscalatingAlertType((string)$problemAlertType);
+		$problemEligible = $hasAlertableProblem
+			&& $startTs !== false
+			&& $problemTransitionTs !== false
+			&& $finishTs !== false
+			&& $nowTs !== false
+			&& $staleCutoffTs !== false
+			&& $problemTransitionTs >= $staleCutoffTs
+			&& $finishTs - $startTs >= $debounceSeconds;
+		$debounceSuppressed = $hasAlertableProblem
+			&& $recovery !== null
+			&& $this->isRecoveryTransition($recovery)
+			&& $startTs !== false
+			&& $finishTs !== false
+			&& $nowTs !== false
+			&& $staleCutoffTs !== false
+			&& $startTs >= $staleCutoffTs
+			&& $finishTs >= $staleCutoffTs
+			&& $finishTs <= $nowTs
+			&& $finishTs >= $startTs
+			&& $finishTs - $startTs < $debounceSeconds;
+
+		if ($problemEligible) {
+			$repeatMode = $this->resolveRepeatMode($problemTransition['repeat_mode'] ?? null, $settings);
+			$existingEscalation = $this->getActiveEscalationForRegistration($registrationId);
+			$this->deleteOtherEscalations($registrationId, (string)$problemAlertType);
+			$this->upsertEscalationForTransition($problemTransition, (string)$problemAlertType, $repeatMode, $now, $existingEscalation);
+
+			if ($canSend) {
+				foreach ($recipients as $recipient) {
+					$priorActions = $this->getProblemAlertResultsForIncident($registrationId, $startId, $endId, $recipient);
+					$lastNotifiedHistoryId = 0;
+					foreach ($priorActions as $priorAction) {
+						if (in_array((string)$priorAction['result'], ['sent', 'storm_suppressed'], true)) {
+							$lastNotifiedHistoryId = max($lastNotifiedHistoryId, (int)$priorAction['history_id']);
+						}
+					}
+
+					if ($debounceSeconds === 0) {
+						$transitionsToAlert = $problemTransitions;
+					} elseif ($lastNotifiedHistoryId === 0) {
+						$transitionsToAlert = [$problemTransition];
+					} else {
+						$transitionsToAlert = array_values(array_filter($problemTransitions, static function (array $transition) use ($lastNotifiedHistoryId): bool {
+							return (int)$transition['id'] > $lastNotifiedHistoryId;
+						}));
+					}
+
+					foreach ($transitionsToAlert as $transition) {
+						$alertType = $this->alertTypeForTransition($transition, $settings);
+						if (!$this->isEscalatingAlertType((string)$alertType) || $this->hasRecordedAlertForRecipient((int)$transition['id'], (string)$alertType, $recipient)) {
+							continue;
+						}
+
+						$email = $this->buildAlertEmail($transition, (string)$alertType);
+						$reserved = $this->reserveAlertHistory([
+							'registration_id' => $registrationId,
+							'registration_key' => $transition['registration_key'],
+							'extension' => $transition['extension'],
+							'history_id' => (int)$transition['id'],
+							'alert_type' => $alertType,
+							'status' => $transition['to_state'],
+							'contact_uri' => $transition['contact_uri'] ?? null,
+							'recipient' => $recipient,
+							'subject' => $email['subject'],
+							'message' => $email['message'],
+							'sent_at' => $now,
+							'result' => 'pending',
+							'error' => null,
+						]);
+						if (!$reserved) {
+							continue;
+						}
+
+						$collectedAlerts[] = [
+							'registration_id' => $registrationId,
+							'registration_key' => (string)$transition['registration_key'],
+							'extension' => (string)$transition['extension'],
+							'history_id' => (int)$transition['id'],
+							'reminder_n' => 0,
+							'alert_type' => (string)$alertType,
+							'status' => (string)$transition['to_state'],
+							'contact_uri' => $transition['contact_uri'] ?? null,
+							'recipient' => $recipient,
+							'subject' => $email['subject'],
+							'message' => $email['message'],
+							'source' => 'transition',
+						];
+					}
+				}
+			}
+		} elseif ($debounceSuppressed && $canSend) {
+			foreach ($recipients as $recipient) {
+				if ($this->hasRecordedAlertForRecipient((int)$problemTransition['id'], (string)$problemAlertType, $recipient)) {
+					continue;
+				}
+
+				$email = $this->buildAlertEmail($problemTransition, (string)$problemAlertType);
+				$reserved = $this->reserveAlertHistory([
+					'registration_id' => $registrationId,
+					'registration_key' => $problemTransition['registration_key'],
+					'extension' => $problemTransition['extension'],
+					'history_id' => (int)$problemTransition['id'],
+					'alert_type' => $problemAlertType,
+					'status' => $problemTransition['to_state'],
+					'contact_uri' => $problemTransition['contact_uri'] ?? null,
+					'recipient' => $recipient,
+					'subject' => $email['subject'],
+					'message' => $email['message'],
+					'sent_at' => $now,
+					'result' => 'pending',
+					'error' => null,
+				]);
+				if ($reserved) {
+					$this->updateReservedAlertHistory(
+						(int)$problemTransition['id'],
+						(string)$problemAlertType,
+						$recipient,
+						'suppressed',
+						'Debounce Delay',
+						$now
+					);
+				}
+			}
+		}
+
+		if ($recovery === null || !$canSend || !$this->isRecoveryTransition($recovery)) {
+			return;
+		}
+
+		$recoveryTs = strtotime((string)$recovery['created_at']);
+		if ($recoveryTs === false || $staleCutoffTs === false || $recoveryTs < $staleCutoffTs || ($nowTs !== false && $recoveryTs > $nowTs)) {
+			return;
+		}
+
+		$recoveryAlertType = $this->alertTypeForTransition($recovery, $settings);
+		if ($recoveryAlertType !== 'recovery') {
+			return;
+		}
+
+		foreach ($recipients as $recipient) {
+			$priorActions = $this->getProblemAlertResultsForIncident($registrationId, $startId, (int)$recovery['id'], $recipient);
+			$problemWasNotified = false;
+			foreach ($priorActions as $priorAction) {
+				if (in_array((string)$priorAction['result'], ['sent', 'storm_suppressed'], true)) {
+					$problemWasNotified = true;
+					break;
+				}
+			}
+			if (!$problemWasNotified || $this->hasRecordedAlertForRecipient((int)$recovery['id'], 'recovery', $recipient)) {
+				continue;
+			}
+
+			$email = $this->buildAlertEmail($recovery, 'recovery');
+			$reserved = $this->reserveAlertHistory([
+				'registration_id' => $registrationId,
+				'registration_key' => $recovery['registration_key'],
+				'extension' => $recovery['extension'],
+				'history_id' => (int)$recovery['id'],
+				'alert_type' => 'recovery',
+				'status' => $recovery['to_state'],
+				'contact_uri' => $recovery['contact_uri'] ?? null,
+				'recipient' => $recipient,
+				'subject' => $email['subject'],
+				'message' => $email['message'],
+				'sent_at' => $now,
+				'result' => 'pending',
+				'error' => null,
+			]);
+			if (!$reserved) {
+				continue;
+			}
+
+			$collectedAlerts[] = [
+				'registration_id' => $registrationId,
+				'registration_key' => (string)$recovery['registration_key'],
+				'extension' => (string)$recovery['extension'],
+				'history_id' => (int)$recovery['id'],
+				'reminder_n' => 0,
+				'alert_type' => 'recovery',
+				'status' => (string)$recovery['to_state'],
+				'contact_uri' => $recovery['contact_uri'] ?? null,
+				'recipient' => $recipient,
+				'subject' => $email['subject'],
+				'message' => $email['message'],
+				'source' => 'transition',
+			];
+		}
+	}
+
+	private function getProblemAlertResultsForIncident(int $registrationId, int $startHistoryId, int $endHistoryId, string $recipient): array {
+		$stmt = $this->db()->prepare(
+			"SELECT history_id, result
+			FROM registrationwatch_alert_history
+			WHERE registration_id = :registration_id
+				AND history_id >= :start_history_id
+				AND history_id <= :end_history_id
+				AND alert_type IN ('unreachable', 'not_registered')
+				AND recipient = :recipient
+				AND reminder_n = 0"
+		);
+		$stmt->execute([
+			':registration_id' => $registrationId,
+			':start_history_id' => $startHistoryId,
+			':end_history_id' => $endHistoryId,
+			':recipient' => $recipient,
+		]);
+
+		return $stmt->fetchAll(\PDO::FETCH_ASSOC);
+	}
+
+	private function isUnhealthyState(string $state): bool {
+		return in_array($this->normaliseState($state), [
+			self::STATUS_UNREACHABLE,
+			self::STATUS_NOT_REGISTERED,
+		], true);
 	}
 
 	private function currentLiveStatusForReminder(array $row, array $liveContacts): string {

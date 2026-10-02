@@ -2,7 +2,7 @@
 <module>
   <rawname>registrationwatch</rawname>
   <name>Registration Watch</name>
-  <version>1.4.3</version>
+  <version>1.4.4</version>
   <publisher>FreePBX UK</publisher>
   <license>GPLv3+</license>
   <licenselink>https://www.gnu.org/licenses/gpl-3.0.txt</licenselink>
@@ -11,6 +11,7 @@
   <more-info>https://github.com/freepbxUK/registrationwatch</more-info>
 
   <changelog>
+    *1.4.4* Fixes debounce alerting so transient registration failures that recover within the configured delay are suppressed rather than sent later. Preserves Status History, records suppressed debounce decisions in Alert History, maintains continuous unhealthy timing across problem-state changes, and requires successful problem delivery before recovery alerting.
     *1.4.3* Patch release fixing Email "From:" Address handling on FreePBX 17 by decoding HTML-entity-encoded values before parsing and validation. Preserves an explicit display name, retains the existing sender-name fallback for bare addresses, and uses one resolved From identity for every email path.
     *1.4.2* Fixes Status History and Alert History pagination so retained history beyond the first 25 rows is accessible. Adds full history totals, bounded server-side pagination, and complete-dataset sorting while preserving page state across refresh and history maintenance actions.
     *1.4.1* First signed FreePBX UK release. Adds FreePBX module signing, updates publisher and repository metadata, and aligns project documentation and support information with the move to the FreePBX UK organisation. No functional module changes.

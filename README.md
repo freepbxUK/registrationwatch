@@ -1,4 +1,4 @@
-# Registration Watch 1.4.3 for FreePBX 16 and 17
+# Registration Watch 1.4.4 for FreePBX 16 and 17
 
 Registration Watch (`registrationwatch`) watches PJSIP registration state in
 FreePBX/PBXact 16 and 17. It discovers configured FreePBX PJSIP devices and tracks
@@ -31,7 +31,7 @@ falls back to a sensible `unknown system` label instead of failing email deliver
 
 ## Release Status
 
-Registration Watch 1.4.3 is the current release for FreePBX 16 and 17.
+Registration Watch 1.4.4 is the current release for FreePBX 16 and 17.
 
 Use the `main` branch for stable releases. Development and release-candidate
 branches may contain incomplete or test-only changes.
@@ -216,7 +216,7 @@ ambiguous. The documented procedure uses `git reset --hard origin/main` to avoid
 that ambiguity.
 
 Rerun the documented GitHub update and verify the version again. Do not proceed
-to signature troubleshooting until module.xml reports `1.4.3`.
+to signature troubleshooting until module.xml reports `1.4.4`.
 
 #### `git fetch origin` cannot find a remote branch
 
@@ -283,7 +283,7 @@ grep -m1 '<version>' /var/www/html/admin/modules/registrationwatch/module.xml
 ### Signature warnings after updating an older unsigned release
 
 Some existing installations upgraded from an older unsigned Registration Watch
-release may initially show a signature warning even though 1.4.3 has been
+release may initially show a signature warning even though 1.4.4 has been
 installed.
 
 #### Module is Unsigned
@@ -305,7 +305,7 @@ grep -m1 '<version>' /var/www/html/admin/modules/registrationwatch/module.xml
 ls -l /var/www/html/admin/modules/registrationwatch/module.sig
 ```
 
-If the version is not `1.4.3`, this is an update problem rather than a signature
+If the version is not `1.4.4`, this is an update problem rather than a signature
 problem.
 
 #### Signed by unknown or untrusted key
@@ -495,9 +495,19 @@ Repeat alert modes:
 
 Stored legacy `fibonacci` repeat-mode values are treated as Escalating.
 
-The default debounce delay is 0 seconds, so first alerts are sent immediately
-when an alertable problem is detected. Increase this value to reduce noise from
-short reloads, restarts, and transient network events.
+Debounce Delay applies to alerting, not Status History. Status History continues
+to record observed registration state transitions. A problem must remain
+continuously unhealthy for the configured delay before its first alert is
+eligible; moving between Unreachable and Not registered does not restart the
+timer.
+
+Returning to a healthy state before the delay expires suppresses the problem
+alert. No problem or recovery email is sent, no repeat or escalation state is
+started, and nothing from that incident is released later. Alert History records
+the decision as Result: Suppressed and Error: Debounce Delay. A debounce value
+of `0` retains immediate alerting. Recovery alerts require the problem to have
+been successfully notified, either by its individual alert or by a successful
+Storm Summary.
 
 Storm Threshold limits large batches of alerts generated in the same processing
 pass. It reduces email floods from sudden widespread registration changes, but
@@ -624,6 +634,19 @@ fwconsole reload
 ```
 
 ## Release History
+
+### 1.4.4, patch release, 2 October 2026
+
+Released by `@kierknoby, Kieran Knowles-Byrne // FreePBX UK`.
+
+This patch fixes debounce alerting so short registration outages that recover
+within the configured delay are suppressed instead of being delivered later.
+Status History continues to record the actual state changes, while Alert
+History records the suppressed alert decision as `Debounce Delay`. Continuous
+unhealthy periods retain their original start time across Unreachable and Not
+registered states, and recovery alerts require the problem to have been
+successfully notified, either by its individual alert or by a successful Storm
+Summary.
 
 ### 1.4.3, patch release, 10 September 2026
 
