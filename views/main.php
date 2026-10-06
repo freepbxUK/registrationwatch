@@ -417,7 +417,7 @@ $_rwAssetVer = max(
 									<?php echo _('Escalating: uses a Fibonacci-style backoff schedule, starting with shorter reminders and gradually increasing the interval up to daily.'); ?>
 								</p>
 							</div>
-							<p class="help-block" style="margin-top:22px;margin-bottom:16px;"><strong><?php echo _('Per-extension repeat overrides can be set in the Watched Extensions table.'); ?></strong></p>
+							<p class="help-block" style="margin-top:0;margin-bottom:16px;"><strong><?php echo _('Per-extension repeat overrides can be set in the Watched Extensions table.'); ?></strong></p>
 							<div class="form-group rw-storm-threshold-group">
 								<label for="rw-storm-threshold"><?php echo _('Storm Threshold'); ?></label>
 								<input type="number" id="rw-storm-threshold" class="form-control" min="0" max="10000" step="1" value="<?php echo htmlspecialchars($alertSettings['storm_threshold'] ?? '20', ENT_QUOTES, 'UTF-8'); ?>">

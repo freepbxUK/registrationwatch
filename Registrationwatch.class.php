@@ -3961,10 +3961,12 @@ class Registrationwatch implements \BMO {
 			&& $finishTs - $startTs < $debounceSeconds;
 
 		if ($problemEligible) {
-			$repeatMode = $this->resolveRepeatMode($problemTransition['repeat_mode'] ?? null, $settings);
-			$existingEscalation = $this->getActiveEscalationForRegistration($registrationId);
-			$this->deleteOtherEscalations($registrationId, (string)$problemAlertType);
-			$this->upsertEscalationForTransition($problemTransition, (string)$problemAlertType, $repeatMode, $now, $existingEscalation);
+			if ($recovery === null) {
+				$repeatMode = $this->resolveRepeatMode($problemTransition['repeat_mode'] ?? null, $settings);
+				$existingEscalation = $this->getActiveEscalationForRegistration($registrationId);
+				$this->deleteOtherEscalations($registrationId, (string)$problemAlertType);
+				$this->upsertEscalationForTransition($problemTransition, (string)$problemAlertType, $repeatMode, $now, $existingEscalation);
+			}
 
 			if ($canSend) {
 				foreach ($recipients as $recipient) {
@@ -3987,6 +3989,11 @@ class Registrationwatch implements \BMO {
 					}
 
 					foreach ($transitionsToAlert as $transition) {
+						$transitionTs = strtotime((string)$transition['created_at']);
+						if ($transitionTs === false || $staleCutoffTs === false || $nowTs === false || $transitionTs < $staleCutoffTs || $transitionTs > $nowTs) {
+							continue;
+						}
+
 						$alertType = $this->alertTypeForTransition($transition, $settings);
 						if (!$this->isEscalatingAlertType((string)$alertType) || $this->hasRecordedAlertForRecipient((int)$transition['id'], (string)$alertType, $recipient)) {
 							continue;

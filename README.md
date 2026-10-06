@@ -635,7 +635,7 @@ fwconsole reload
 
 ## Release History
 
-### 1.4.4, patch release, 2 October 2026
+### 1.4.4, patch release, 6 October 2026
 
 Released by `@kierknoby, Kieran Knowles-Byrne // FreePBX UK`.
 

@@ -1927,6 +1927,15 @@ $lateZeroSecondDelta = $runQueueAndCountEmails($lateZeroHandoffQueue, $lateZeroH
 $lateZeroTypes = $lateZeroHandoffDb->query("SELECT alert_type FROM registrationwatch_alert_history WHERE reminder_n = 0 ORDER BY history_id")->fetchAll(PDO::FETCH_COLUMN);
 assert_true($lateZeroInitialDelta === 1 && $lateZeroSecondDelta === 1 && $lateZeroTypes === ['unreachable', 'not_registered'], 'fresh Not registered transition should alert after the original incident start becomes stale with zero debounce');
 
+[$staleAnchorZeroDb, $staleAnchorZeroWatch, $staleAnchorZeroQueue] = $makeQueueFixture(0);
+[$staleAnchorZeroId, $staleAnchorZeroKey] = $insertQueueRegistration($staleAnchorZeroDb, 'debounce-stale-anchor-zero');
+$staleAnchorZeroProblemId = $insertQueueTransition($staleAnchorZeroDb, $staleAnchorZeroId, $staleAnchorZeroKey, 'debounce-stale-anchor-zero', 'Reachable', 'Unreachable', '2026-06-15 09:00:00');
+$staleAnchorZeroFreshId = $insertQueueTransition($staleAnchorZeroDb, $staleAnchorZeroId, $staleAnchorZeroKey, 'debounce-stale-anchor-zero', 'Unreachable', 'Not registered', '2026-06-15 09:10:00');
+$staleAnchorZeroEmailDelta = $runQueueAndCountEmails($staleAnchorZeroQueue, $staleAnchorZeroWatch, '2026-06-15 09:10:00');
+$staleAnchorZeroRows = $staleAnchorZeroDb->query('SELECT history_id, alert_type FROM registrationwatch_alert_history WHERE reminder_n = 0')->fetchAll(PDO::FETCH_ASSOC);
+assert_true((int)$staleAnchorZeroDb->query('SELECT COUNT(*) FROM registrationwatch_alert_history WHERE history_id = ' . $staleAnchorZeroProblemId)->fetchColumn() === 0, 'pre-window Unreachable anchor must not create a new Alert History action');
+assert_true(count($staleAnchorZeroRows) === 1 && (int)$staleAnchorZeroRows[0]['history_id'] === $staleAnchorZeroFreshId && $staleAnchorZeroRows[0]['alert_type'] === 'not_registered' && $staleAnchorZeroEmailDelta === 1, 'zero debounce should deliver only the fresh Not registered transition');
+
 [$lateDebouncedHandoffDb, $lateDebouncedHandoffWatch, $lateDebouncedHandoffQueue] = $makeQueueFixture(300);
 [$lateDebouncedHandoffId, $lateDebouncedHandoffKey] = $insertQueueRegistration($lateDebouncedHandoffDb, 'debounce-late-state-change');
 $insertQueueTransition($lateDebouncedHandoffDb, $lateDebouncedHandoffId, $lateDebouncedHandoffKey, 'debounce-late-state-change', 'Reachable', 'Unreachable', '2026-06-15 09:00:00');
@@ -1936,6 +1945,15 @@ $lateDebouncedSecondDelta = $runQueueAndCountEmails($lateDebouncedHandoffQueue, 
 $lateDebouncedTypes = $lateDebouncedHandoffDb->query("SELECT alert_type FROM registrationwatch_alert_history WHERE reminder_n = 0 ORDER BY history_id")->fetchAll(PDO::FETCH_COLUMN);
 assert_true($lateDebouncedInitialDelta === 1 && $lateDebouncedSecondDelta === 1 && $lateDebouncedTypes === ['unreachable', 'not_registered'], 'fresh Not registered transition should alert immediately after an already-matured continuous incident');
 
+[$staleAnchorDebouncedDb, $staleAnchorDebouncedWatch, $staleAnchorDebouncedQueue] = $makeQueueFixture(300);
+[$staleAnchorDebouncedId, $staleAnchorDebouncedKey] = $insertQueueRegistration($staleAnchorDebouncedDb, 'debounce-stale-anchor-matured');
+$staleAnchorDebouncedProblemId = $insertQueueTransition($staleAnchorDebouncedDb, $staleAnchorDebouncedId, $staleAnchorDebouncedKey, 'debounce-stale-anchor-matured', 'Reachable', 'Unreachable', '2026-06-15 09:00:00');
+$staleAnchorDebouncedFreshId = $insertQueueTransition($staleAnchorDebouncedDb, $staleAnchorDebouncedId, $staleAnchorDebouncedKey, 'debounce-stale-anchor-matured', 'Unreachable', 'Not registered', '2026-06-15 09:20:00');
+$staleAnchorDebouncedEmailDelta = $runQueueAndCountEmails($staleAnchorDebouncedQueue, $staleAnchorDebouncedWatch, '2026-06-15 09:20:00');
+$staleAnchorDebouncedRows = $staleAnchorDebouncedDb->query('SELECT history_id, alert_type FROM registrationwatch_alert_history WHERE reminder_n = 0')->fetchAll(PDO::FETCH_ASSOC);
+assert_true((int)$staleAnchorDebouncedDb->query('SELECT COUNT(*) FROM registrationwatch_alert_history WHERE history_id = ' . $staleAnchorDebouncedProblemId)->fetchColumn() === 0, 'matured incident timing anchor must not become a replayed Unreachable alert');
+assert_true(count($staleAnchorDebouncedRows) === 1 && (int)$staleAnchorDebouncedRows[0]['history_id'] === $staleAnchorDebouncedFreshId && $staleAnchorDebouncedRows[0]['alert_type'] === 'not_registered' && $staleAnchorDebouncedEmailDelta === 1, 'matured positive debounce should deliver only the fresh Not registered transition');
+
 [$freshRecoveryDb, $freshRecoveryWatch, $freshRecoveryQueue] = $makeQueueFixture(300);
 [$freshRecoveryId, $freshRecoveryKey] = $insertQueueRegistration($freshRecoveryDb, 'debounce-old-problem-fresh-recovery');
 $oldUnsentProblemId = $insertQueueTransition($freshRecoveryDb, $freshRecoveryId, $freshRecoveryKey, 'debounce-old-problem-fresh-recovery', 'Reachable', 'Unreachable', '2026-06-15 08:00:00');
@@ -1943,6 +1961,32 @@ $insertQueueTransition($freshRecoveryDb, $freshRecoveryId, $freshRecoveryKey, 'd
 $freshRecoveryEmailDelta = $runQueueAndCountEmails($freshRecoveryQueue, $freshRecoveryWatch, '2026-06-15 09:20:00');
 assert_true((int)$freshRecoveryDb->query('SELECT COUNT(*) FROM registrationwatch_alert_history')->fetchColumn() === 0 && $freshRecoveryEmailDelta === 0, 'fresh recovery must not release an old unsent problem transition');
 assert_true($oldUnsentProblemId === 1, 'fresh-recovery stale-protection fixture should use the old problem transition as its incident anchor');
+
+[$reminderReplayDb, $reminderReplayWatch, $reminderReplayQueue] = $makeQueueFixture(0, 0);
+[$reminderReplayId, $reminderReplayKey] = $insertQueueRegistration($reminderReplayDb, 'reminder-replay', 'Unreachable', 'hourly');
+$insertQueueTransition($reminderReplayDb, $reminderReplayId, $reminderReplayKey, 'reminder-replay', 'Reachable', 'Unreachable', '2026-06-15 09:00:00');
+$runQueue($reminderReplayQueue, $reminderReplayWatch, '2026-06-15 09:00:00');
+$insertQueueTransition($reminderReplayDb, $reminderReplayId, $reminderReplayKey, 'reminder-replay', 'Unreachable', 'Reachable', '2026-06-15 09:00:10');
+$reminderReplayDb->exec("UPDATE registrationwatch_registrations SET last_known_status = 'Reachable' WHERE id = {$reminderReplayId}");
+$runQueue($reminderReplayQueue, $reminderReplayWatch, '2026-06-15 09:00:10');
+assert_true((int)$reminderReplayDb->query('SELECT COUNT(*) FROM registrationwatch_alert_escalation')->fetchColumn() === 0, 'genuine recovery must cancel the current hourly reminder');
+$newReminderProblemId = $insertQueueTransition($reminderReplayDb, $reminderReplayId, $reminderReplayKey, 'reminder-replay', 'Reachable', 'Unreachable', '2026-06-15 09:00:20');
+$reminderReplayDb->exec("UPDATE registrationwatch_registrations SET last_known_status = 'Unreachable' WHERE id = {$reminderReplayId}");
+$runQueue($reminderReplayQueue, $reminderReplayWatch, '2026-06-15 09:00:20');
+$reminderStateSql = "SELECT history_id, active_since, alert_count, last_alert_at, next_due_at FROM registrationwatch_alert_escalation WHERE registration_id = {$reminderReplayId}";
+$newReminderState = $reminderReplayDb->query($reminderStateSql)->fetch(PDO::FETCH_ASSOC);
+assert_true(is_array($newReminderState) && (int)$newReminderState['history_id'] === $newReminderProblemId && $newReminderState['active_since'] === '2026-06-15 09:00:20' && $newReminderState['last_alert_at'] === '2026-06-15 09:00:20' && (int)$newReminderState['alert_count'] === 0 && $newReminderState['next_due_at'] === '2026-06-15 10:00:20', 'a subsequent failure must start its own hourly schedule due at 10:00:20');
+$runQueue($reminderReplayQueue, $reminderReplayWatch, '2026-06-15 09:00:30');
+assert_true($reminderReplayDb->query($reminderStateSql)->fetch(PDO::FETCH_ASSOC) === $newReminderState, 'replaying the finished outage must not reset the new reminder schedule at 09:00:30');
+$reminderReplayDb->exec("UPDATE registrationwatch_alert_escalation SET alert_count = 3, last_alert_at = '2026-06-15 09:00:25' WHERE registration_id = {$reminderReplayId}");
+$countedReminderState = $reminderReplayDb->query($reminderStateSql)->fetch(PDO::FETCH_ASSOC);
+$runQueue($reminderReplayQueue, $reminderReplayWatch, '2026-06-15 09:00:40');
+$runQueue($reminderReplayQueue, $reminderReplayWatch, '2026-06-15 09:00:50');
+assert_true($reminderReplayDb->query($reminderStateSql)->fetch(PDO::FETCH_ASSOC) === $countedReminderState, 'repeated historical replay must preserve a nonzero reminder count and all current schedule fields');
+$insertQueueTransition($reminderReplayDb, $reminderReplayId, $reminderReplayKey, 'reminder-replay', 'Unreachable', 'Reachable', '2026-06-15 09:01:00');
+$reminderReplayDb->exec("UPDATE registrationwatch_registrations SET last_known_status = 'Reachable' WHERE id = {$reminderReplayId}");
+$runQueue($reminderReplayQueue, $reminderReplayWatch, '2026-06-15 09:01:00');
+assert_true((int)$reminderReplayDb->query('SELECT COUNT(*) FROM registrationwatch_alert_escalation')->fetchColumn() === 0, 'a genuine later recovery must still cancel the newer incident reminder');
 
 $replayDbFixture = $makeQueueFixture(300);
 [$replayDb, $replayWatch, $replayQueue] = $replayDbFixture;
