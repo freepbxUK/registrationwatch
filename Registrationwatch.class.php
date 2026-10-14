@@ -3347,7 +3347,17 @@ class Registrationwatch implements \BMO {
 									AND prior.source = :prior_source
 									AND prior.created_at < :prior_cutoff
 									AND prior.to_state IN (:prior_to_unreachable, :prior_to_not_registered)
-									AND (prior.from_state IS NULL OR prior.from_state NOT IN (:prior_from_unreachable, :prior_from_not_registered))
+									AND prior.from_state IN (:prior_from_reachable, :prior_from_registered_no_qualify)
+									AND NOT EXISTS (
+										SELECT 1
+										FROM registrationwatch_status_history boundary
+										WHERE boundary.registration_id = prior.registration_id
+											AND boundary.source = :boundary_source
+											AND (boundary.created_at > prior.created_at OR (boundary.created_at = prior.created_at AND boundary.id > prior.id))
+											AND boundary.created_at < :boundary_cutoff
+											AND boundary.from_state IN (:boundary_from_unreachable, :boundary_from_not_registered, :boundary_from_unknown)
+											AND boundary.to_state IN (:boundary_to_reachable, :boundary_to_registered_no_qualify)
+									)
 								ORDER BY prior.created_at DESC, prior.id DESC
 								LIMIT 1
 							)
@@ -3359,10 +3369,17 @@ class Registrationwatch implements \BMO {
 				$params[':now'] = $now;
 				$params[':prior_source'] = 'reconcile';
 				$params[':prior_cutoff'] = $staleCutoff;
+				$params[':boundary_cutoff'] = $staleCutoff;
 				$params[':prior_to_unreachable'] = self::STATUS_UNREACHABLE;
 				$params[':prior_to_not_registered'] = self::STATUS_NOT_REGISTERED;
-				$params[':prior_from_unreachable'] = self::STATUS_UNREACHABLE;
-				$params[':prior_from_not_registered'] = self::STATUS_NOT_REGISTERED;
+				$params[':prior_from_reachable'] = self::STATUS_REACHABLE;
+				$params[':prior_from_registered_no_qualify'] = self::STATUS_REGISTERED_NO_QUALIFY;
+				$params[':boundary_source'] = 'reconcile';
+				$params[':boundary_from_unreachable'] = self::STATUS_UNREACHABLE;
+				$params[':boundary_from_not_registered'] = self::STATUS_NOT_REGISTERED;
+				$params[':boundary_from_unknown'] = self::STATUS_UNKNOWN;
+				$params[':boundary_to_reachable'] = self::STATUS_REACHABLE;
+				$params[':boundary_to_registered_no_qualify'] = self::STATUS_REGISTERED_NO_QUALIFY;
 				$historyStmt->execute($params);
 
 				$transitionsByRegistration = [];
@@ -3378,7 +3395,7 @@ class Registrationwatch implements \BMO {
 						$fromUnhealthy = $this->isUnhealthyState($from);
 						$toUnhealthy = $this->isUnhealthyState($to);
 
-						if (!$fromUnhealthy && $toUnhealthy) {
+						if (!$fromUnhealthy && $toUnhealthy && !($from === self::STATUS_UNKNOWN && $incident !== null)) {
 							$incident = [
 								'start' => $transition,
 								'start_is_alertable' => $this->hadRegisteredState($from) && !$fromUnhealthy,
@@ -3408,7 +3425,7 @@ class Registrationwatch implements \BMO {
 							}
 						}
 
-						if ($fromUnhealthy && !$toUnhealthy) {
+						if ($incident !== null && $this->isRecoveryTransition($transition)) {
 							if ($incident !== null) {
 								$this->processAlertIncident(
 									$incident,
@@ -3458,7 +3475,7 @@ class Registrationwatch implements \BMO {
 	private function alertTypeForTransition(array $transition, array $settings): ?string {
 		$from = $this->normaliseState($transition['from_state'] ?? '');
 		$to = $this->normaliseState($transition['to_state'] ?? '');
-		if ($from === '' || $from === self::STATUS_UNKNOWN) {
+		if ($from === '') {
 			return null;
 		}
 
@@ -3474,10 +3491,10 @@ class Registrationwatch implements \BMO {
 			return 'not_registered';
 		}
 
-		if ($settings['alert_on_recovery'] === '1' && in_array($from, [
+		if ($settings['alert_on_recovery'] === '1' && (in_array($from, [
 			self::STATUS_UNREACHABLE,
 			self::STATUS_NOT_REGISTERED,
-		], true) && in_array($to, [
+		], true) || $from === self::STATUS_UNKNOWN) && in_array($to, [
 			self::STATUS_REACHABLE,
 			self::STATUS_REGISTERED_NO_QUALIFY,
 		], true)) {
@@ -3494,53 +3511,25 @@ class Registrationwatch implements \BMO {
 	private function isRecoveryTransition(array $transition): bool {
 		$from = $this->normaliseState($transition['from_state'] ?? '');
 		$to = $this->normaliseState($transition['to_state'] ?? '');
-		return in_array($from, [
+		return (in_array($from, [
 			self::STATUS_UNREACHABLE,
 			self::STATUS_NOT_REGISTERED,
-		], true) && in_array($to, [
+		], true) || $from === self::STATUS_UNKNOWN) && in_array($to, [
 			self::STATUS_REACHABLE,
 			self::STATUS_REGISTERED_NO_QUALIFY,
 		], true);
 	}
 
-	private function recoveryEscalationTypesForTransition(array $transition): array {
-		$from = $this->normaliseState($transition['from_state'] ?? '');
-
-		if ($from === self::STATUS_UNREACHABLE) {
-			return ['unreachable'];
-		}
-		if ($from === self::STATUS_NOT_REGISTERED) {
-			return ['not_registered'];
-		}
-
-		return [];
-	}
-
 	private function resetEscalationForRecovery(array $transition): void {
-		$types = $this->recoveryEscalationTypesForTransition($transition);
-		if (!$types) {
-			return;
-		}
-
-		$placeholders = [];
-		$params = [
-			':registration_id' => (int)$transition['registration_id'],
-		];
-
-		foreach ($types as $index => $type) {
-			$key = ':type_' . $index;
-			$placeholders[] = $key;
-			$params[$key] = $type;
-		}
-
 		$stmt = $this->db()->prepare(
 			'DELETE FROM registrationwatch_alert_escalation
 			WHERE registration_id = :registration_id
-				AND alert_type IN (' . implode(', ', $placeholders) . ')
 				AND history_id <= :recovery_history_id'
 		);
-		$params[':recovery_history_id'] = (int)$transition['id'];
-		$stmt->execute($params);
+		$stmt->execute([
+			':registration_id' => (int)$transition['registration_id'],
+			':recovery_history_id' => (int)$transition['id'],
+		]);
 	}
 
 	private function resolveRepeatMode(?string $registrationRepeatMode, array $settings): string {
@@ -3627,16 +3616,12 @@ class Registrationwatch implements \BMO {
 		$stmt->execute([':registration_id' => $registrationId]);
 	}
 
-	private function deleteEscalation(int $registrationId, string $alertType): void {
+	private function deleteEscalationById(int $id): void {
 		$stmt = $this->db()->prepare(
 			'DELETE FROM registrationwatch_alert_escalation
-			WHERE registration_id = :registration_id
-				AND alert_type = :alert_type'
+			WHERE id = :id'
 		);
-		$stmt->execute([
-			':registration_id' => $registrationId,
-			':alert_type' => $alertType,
-		]);
+		$stmt->execute([':id' => $id]);
 	}
 
 	private function deleteOtherEscalations(int $registrationId, string $activeAlertType): void {
@@ -3679,15 +3664,50 @@ class Registrationwatch implements \BMO {
 		$stmt->execute([':now' => $now]);
 
 		foreach ($stmt->fetchAll(\PDO::FETCH_ASSOC) as $row) {
-			$currentStatus = $this->currentLiveStatusForReminder($row, $liveContacts);
-			if (!$this->isReminderStillAlertable((string)$row['alert_type'], $currentStatus)) {
-				$this->deleteEscalation((int)$row['registration_id'], (string)$row['alert_type']);
+			$newerStmt = $this->db()->prepare(
+				'SELECT id FROM registrationwatch_alert_escalation
+				WHERE registration_id = :registration_id
+					AND (history_id > :history_id OR (history_id = :history_id AND id > :id))
+				ORDER BY history_id DESC, id DESC
+				LIMIT 1'
+			);
+			$newerStmt->execute([
+				':registration_id' => (int)$row['registration_id'],
+				':history_id' => (int)$row['history_id'],
+				':id' => (int)$row['id'],
+			]);
+			if ($newerStmt->fetchColumn() !== false) {
+				$this->deleteEscalationById((int)$row['id']);
 				continue;
+			}
+
+			$currentStatus = $this->currentLiveStatusForReminder($row, $liveContacts);
+			if (!$this->isReminderStillAlertable($currentStatus)) {
+				if ($currentStatus === self::STATUS_UNKNOWN) {
+					continue;
+				}
+				$this->deleteEscalationById((int)$row['id']);
+				continue;
+			}
+			$alertType = $this->reminderAlertTypeForStatus($currentStatus);
+			if ($alertType === null) {
+				$this->deleteEscalationById((int)$row['id']);
+				continue;
+			}
+			if (($alertType === 'unreachable' && $settings['alert_on_unreachable'] !== '1')
+				|| ($alertType === 'not_registered' && $settings['alert_on_not_registered'] !== '1')) {
+				continue;
+			}
+			if ((string)$row['alert_type'] !== $alertType) {
+				if (!$this->retargetEscalationForReminder($row, $alertType)) {
+					continue;
+				}
+				$row['alert_type'] = $alertType;
 			}
 
 			$reminderN = ((int)$row['alert_count']) + 1;
 			$transition = $this->buildReminderTransition($row, $currentStatus, $now);
-			$email = $this->buildAlertEmail($transition, (string)$row['alert_type']);
+			$email = $this->buildAlertEmail($transition, $alertType);
 			$reservedAny = false;
 
 			foreach ($recipients as $recipient) {
@@ -3697,7 +3717,7 @@ class Registrationwatch implements \BMO {
 					'extension' => $row['extension'],
 					'history_id' => (int)$row['history_id'],
 					'reminder_n' => $reminderN,
-					'alert_type' => $row['alert_type'],
+					'alert_type' => $alertType,
 					'status' => $currentStatus,
 					'contact_uri' => $row['contact_uri'] ?? null,
 					'recipient' => $recipient,
@@ -3718,7 +3738,7 @@ class Registrationwatch implements \BMO {
 					'extension' => (string)$row['extension'],
 					'history_id' => (int)$row['history_id'],
 					'reminder_n' => $reminderN,
-					'alert_type' => (string)$row['alert_type'],
+					'alert_type' => $alertType,
 					'status' => $currentStatus,
 					'contact_uri' => $row['contact_uri'] ?? null,
 					'recipient' => $recipient,
@@ -4143,8 +4163,7 @@ class Registrationwatch implements \BMO {
 				AND history_id >= :start_history_id
 				AND history_id <= :end_history_id
 				AND alert_type IN ('unreachable', 'not_registered')
-				AND recipient = :recipient
-				AND reminder_n = 0"
+				AND recipient = :recipient"
 		);
 		$stmt->execute([
 			':registration_id' => $registrationId,
@@ -4172,16 +4191,55 @@ class Registrationwatch implements \BMO {
 		return self::STATUS_NOT_REGISTERED;
 	}
 
-	private function isReminderStillAlertable(string $alertType, string $currentStatus): bool {
-		$currentStatus = $this->normaliseState($currentStatus);
-		if ($alertType === 'unreachable') {
-			return $currentStatus === self::STATUS_UNREACHABLE;
+	private function isReminderStillAlertable(string $currentStatus): bool {
+		return $this->isUnhealthyState($currentStatus);
+	}
+
+	private function reminderAlertTypeForStatus(string $currentStatus): ?string {
+		switch ($this->normaliseState($currentStatus)) {
+			case self::STATUS_UNREACHABLE:
+				return 'unreachable';
+			case self::STATUS_NOT_REGISTERED:
+				return 'not_registered';
+			default:
+				return null;
 		}
-		if ($alertType === 'not_registered') {
-			return $currentStatus === self::STATUS_NOT_REGISTERED;
+	}
+
+	private function retargetEscalationForReminder(array $row, string $alertType): bool {
+		$conflict = $this->db()->prepare(
+			'SELECT id, history_id FROM registrationwatch_alert_escalation
+			WHERE registration_id = :registration_id
+				AND alert_type = :alert_type
+				AND id <> :id
+			ORDER BY history_id DESC, id DESC
+			LIMIT 1'
+		);
+		$conflict->execute([
+			':registration_id' => (int)$row['registration_id'],
+			':alert_type' => $alertType,
+			':id' => (int)$row['id'],
+		]);
+		$conflictRow = $conflict->fetch(\PDO::FETCH_ASSOC);
+		if (is_array($conflictRow)) {
+			if ((int)$conflictRow['history_id'] >= (int)$row['history_id']) {
+				$this->deleteEscalationById((int)$row['id']);
+				return false;
+			}
+			$this->deleteEscalationById((int)$conflictRow['id']);
 		}
 
-		return false;
+		$stmt = $this->db()->prepare(
+			'UPDATE registrationwatch_alert_escalation
+			SET alert_type = :alert_type
+			WHERE id = :id'
+		);
+		$stmt->execute([
+			':alert_type' => $alertType,
+			':id' => (int)$row['id'],
+		]);
+
+		return true;
 	}
 
 	private function buildReminderTransition(array $row, string $currentStatus, string $now): array {
@@ -4206,7 +4264,7 @@ class Registrationwatch implements \BMO {
 		$repeatMode = $this->normaliseRepeatMode($row['repeat_mode'] ?? self::REPEAT_MODE_NEVER);
 		$nextDueAt = $this->nextRepeatDueAt($now, $repeatMode, $reminderN);
 		if ($nextDueAt === null) {
-			$this->deleteEscalation((int)$row['registration_id'], (string)$row['alert_type']);
+			$this->deleteEscalationById((int)$row['id']);
 			return;
 		}
 

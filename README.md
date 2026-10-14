@@ -31,7 +31,10 @@ falls back to a sensible `unknown system` label instead of failing email deliver
 
 ## Release Status
 
-Registration Watch 1.4.4 is the current release for FreePBX 16 and 17.
+Registration Watch 1.4.4 is in development for FreePBX 16 and 17. Final live
+PBX testing and module signing remain pending, so this version is not yet
+published or signed. The planned release date is 14 October 2026, subject to
+those final checks.
 
 Use the `main` branch for stable releases. Development and release-candidate
 branches may contain incomplete or test-only changes.
@@ -283,8 +286,8 @@ grep -m1 '<version>' /var/www/html/admin/modules/registrationwatch/module.xml
 ### Signature warnings after updating an older unsigned release
 
 Some existing installations upgraded from an older unsigned Registration Watch
-release may initially show a signature warning even though 1.4.4 has been
-installed.
+release may initially show a signature warning after 1.4.4 is published and
+signed.
 
 #### Module is Unsigned
 
@@ -477,15 +480,25 @@ Alertable transitions:
 * Unreachable or Not registered to Reachable
 * Unreachable or Not registered to Registered (no qualify)
 
-First baseline transitions from Unknown are suppressed. Old status-history rows
-are not replayed later after recipient or settings changes.
+An Unknown-origin problem transition does not start a new alertable incident.
+However, Unknown does not end an existing incident that began in an alertable
+unhealthy state. That incident can recover directly from Unknown if its problem
+was successfully notified. Old status-history rows are not replayed later after
+recipient or settings changes.
 
-Repeat alert modes can send reminders while an alertable registration state
-continues. A recovery transition resets the reminder clock.
+Repeat alert modes continue on the same schedule throughout a continuous
+unhealthy incident, including transitions between Unreachable, Unknown and Not
+registered. A change between alertable unhealthy states may still produce an
+initial problem notification when that state's alert is enabled, but it does not
+restart the existing repeat schedule or numbering. Reminders use the current
+live unhealthy state and respect its corresponding Alert on toggle. If the live
+state is Unknown, or its alert toggle is disabled, a due reminder is deferred
+without consuming its reminder number. It can be sent on a later monitoring
+pass when a known unhealthy state is present and the relevant alert is enabled.
 
 Repeat alert modes:
 
-* Never: send only the initial state-change alert.
+* Never: send no repeat reminders. Eligible initial notifications for later alertable unhealthy-state changes can still be sent.
 * Every 5 minutes: repeat every 5 minutes while the registration remains unavailable.
 * Hourly: repeat once per hour while unavailable.
 * Daily: repeat once per day while unavailable.
@@ -505,9 +518,9 @@ Returning to a healthy state before the delay expires suppresses the problem
 alert. No problem or recovery email is sent, no repeat or escalation state is
 started, and nothing from that incident is released later. Alert History records
 the decision as Result: Suppressed and Error: Debounce Delay. A debounce value
-of `0` retains immediate alerting. Recovery alerts require the problem to have
-been successfully notified, either by its individual alert or by a successful
-Storm Summary.
+of `0` retains immediate alerting. A genuine recovery cancels the active repeat
+schedule. Recovery alerts require a successful problem notification, whether it
+was an initial alert, a repeat, or coverage by a successful Storm Summary.
 
 Storm Threshold limits large batches of alerts generated in the same processing
 pass. It reduces email floods from sudden widespread registration changes, but
@@ -635,18 +648,28 @@ fwconsole reload
 
 ## Release History
 
-### 1.4.4, patch release, 6 October 2026
+### 1.4.4, patch release, planned 14 October 2026
 
-Released by `@kierknoby, Kieran Knowles-Byrne // FreePBX UK`.
+This development release is prepared for publication after final live PBX
+testing and module signing.
 
-This patch fixes debounce alerting so short registration outages that recover
-within the configured delay are suppressed instead of being delivered later.
-Status History continues to record the actual state changes, while Alert
-History records the suppressed alert decision as `Debounce Delay`. Continuous
-unhealthy periods retain their original start time across Unreachable and Not
-registered states, and recovery alerts require the problem to have been
-successfully notified, either by its individual alert or by a successful Storm
-Summary.
+Debounce Delay now suppresses transient failures that recover within the
+configured delay. Status History retains actual transitions, and Alert History
+records suppressed debounce decisions. Problem tracking and repeat schedules
+continue across Unreachable, Unknown and Not registered states. Unknown does not
+start a new problem alert or end an existing incident; due reminders are
+deferred without consuming their number until a known unhealthy state returns.
+Transitions into another alertable unhealthy state can still produce an
+initial notification when enabled, without restarting the incident's repeat
+schedule.
+
+Recovery notifications follow successful initial alerts, repeats or Storm
+Summaries, including recovery directly from Unknown for an existing notified
+incident. Duplicate and obsolete reminders are prevented, newer incident
+schedules are preserved during recovery cleanup, and historical replay respects
+completed recovery boundaries. Repeat reminders also honour their corresponding
+alert-type settings. Expanded regression coverage and native PDO MySQL prepared
+statement compatibility checks pass.
 
 ### 1.4.3, patch release, 10 September 2026
 
