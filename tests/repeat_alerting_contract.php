@@ -2316,7 +2316,7 @@ $runConfirmedRepeatRegression('debounced same-state repeats', function () use ($
 		assert_true($state['next_due_at'] === $nextDueAt, 'next reminder should be scheduled from the last delivered repeat');
 	}
 	$history = $database->query("SELECT alert_type, status, reminder_n, subject FROM registrationwatch_alert_history WHERE registration_id = {$registrationId} ORDER BY reminder_n")->fetchAll(PDO::FETCH_ASSOC);
-	assert_true(array_column($history, 'reminder_n') === [0, 1, 2, 3], 'Alert History should contain the initial alert and reminders 1 through 3');
+	assert_true(array_map('intval', array_column($history, 'reminder_n')) === [0, 1, 2, 3], 'Alert History should contain the initial alert and reminders 1 through 3');
 	assert_true(array_column($history, 'alert_type') === ['unreachable', 'unreachable', 'unreachable', 'unreachable'], 'same-state Alert History should retain the Unreachable type');
 	assert_true(array_column($history, 'status') === ['Unreachable', 'Unreachable', 'Unreachable', 'Unreachable'], 'same-state Alert History should retain the live status');
 	assert_true(strpos($history[3]['subject'], 'still Unreachable') !== false, 'reminder subject should name the current unhealthy status');
@@ -2337,7 +2337,7 @@ $runConfirmedRepeatRegression('Not registered repeats', function () use ($makeQu
 		assert_true($runQueueAndCountEmails($queue, $watch, $dueAt) === 1, 'persistent Not registered should send one reminder at ' . $dueAt);
 	}
 	$history = $database->query("SELECT alert_type, status, reminder_n, subject FROM registrationwatch_alert_history WHERE registration_id = {$registrationId} ORDER BY reminder_n")->fetchAll(PDO::FETCH_ASSOC);
-	assert_true(array_column($history, 'reminder_n') === [0, 1, 2, 3], 'Not registered history should number the initial alert and first three repeats');
+	assert_true(array_map('intval', array_column($history, 'reminder_n')) === [0, 1, 2, 3], 'Not registered history should number the initial alert and first three repeats');
 	assert_true(array_column($history, 'alert_type') === ['not_registered', 'not_registered', 'not_registered', 'not_registered'] && array_column($history, 'status') === ['Not registered', 'Not registered', 'Not registered', 'Not registered'], 'Not registered reminders must use matching alert type and status');
 	assert_true(strpos($history[3]['subject'], 'still Not registered') !== false, 'Not registered reminder subject must use the current state');
 });
@@ -2521,7 +2521,7 @@ $runConfirmedRepeatRegression('snoozed repeats retain existing counter policy', 
 	$database->prepare("UPDATE registrationwatch_settings SET setting_value = '' WHERE setting_key = 'monitoring_snoozed_until'")->execute();
 	assert_true($runQueueAndCountEmails($queue, $watch, '2026-06-15 09:15:00') === 1, 'unsnoozed later reminder should be attempted');
 	$history = $database->query("SELECT reminder_n, result FROM registrationwatch_alert_history WHERE registration_id = {$registrationId} ORDER BY reminder_n")->fetchAll(PDO::FETCH_ASSOC);
-	assert_true(array_column($history, 'reminder_n') === [0, 1, 2] && array_column($history, 'result') === ['suppressed', 'suppressed', 'sent'], 'snoozed cycles should remain audited and continue numbering under existing policy');
+	assert_true(array_map('intval', array_column($history, 'reminder_n')) === [0, 1, 2] && array_column($history, 'result') === ['suppressed', 'suppressed', 'sent'], 'snoozed cycles should remain audited and continue numbering under existing policy');
 	$state = $database->query("SELECT alert_count, next_due_at FROM registrationwatch_alert_escalation WHERE registration_id = {$registrationId}")->fetch(PDO::FETCH_ASSOC);
 	assert_true((int)$state['alert_count'] === 2 && $state['next_due_at'] === '2026-06-15 09:20:00', 'snoozed reminders should advance the existing schedule policy');
 });
@@ -2582,7 +2582,7 @@ $runConfirmedRepeatRegression('Sam 247020 Unknown handoff timeline', function ()
 	$recoveryHistory = $database->query("SELECT result FROM registrationwatch_alert_history WHERE registration_id = {$registrationId} AND alert_type = 'recovery'")->fetchColumn();
 	$escalationCount = (int)$database->query("SELECT COUNT(*) FROM registrationwatch_alert_escalation WHERE registration_id = {$registrationId}")->fetchColumn();
 	assert_true($recoveryEmailDelta === 1 && $recoveryHistory === 'sent', 'Sam timeline should send recovery after successfully delivered repeats; got ' . json_encode([$recoveryEmailDelta, $recoveryHistory, $problemHistory, $escalationCount]));
-	assert_true(count($problemHistory) === 6 && array_column($problemHistory, 'reminder_n') === [0, 1, 2, 3, 4, 5], 'Sam timeline should preserve one initial alert and five sequential repeats');
+	assert_true(count($problemHistory) === 6 && array_map('intval', array_column($problemHistory, 'reminder_n')) === [0, 1, 2, 3, 4, 5], 'Sam timeline should preserve one initial alert and five sequential repeats');
 	assert_true($escalationCount === 0, 'Sam timeline recovery should cancel the active escalation');
 });
 
@@ -2604,7 +2604,7 @@ $runConfirmedRepeatRegression('Unknown at due time defers repeat', function () u
 	$setQueueLiveStatus($watch, 'repeat-unknown-at-due', '192.0.2.248', 'Not registered');
 	assert_true($runQueueAndCountEmails($queue, $watch, '2026-06-15 09:09:00') === 1, 'returning to a known unhealthy state should deliver the still-due repeat once');
 	$history = $database->query("SELECT reminder_n, alert_type, status FROM registrationwatch_alert_history WHERE registration_id = {$registrationId} ORDER BY id")->fetchAll(PDO::FETCH_ASSOC);
-	assert_true(array_column($history, 'reminder_n') === [0, 1] && $history[1]['alert_type'] === 'not_registered' && $history[1]['status'] === 'Not registered', 'deferred reminder should retain its number and follow the known current unhealthy state');
+	assert_true(array_map('intval', array_column($history, 'reminder_n')) === [0, 1] && $history[1]['alert_type'] === 'not_registered' && $history[1]['status'] === 'Not registered', 'deferred reminder should retain its number and follow the known current unhealthy state');
 });
 
 $runConfirmedRepeatRegression('Unknown to Reachable authorizes recovery', function () use ($makeQueueFixture, $insertQueueRegistration, $insertQueueTransition, $runQueueAndCountEmails, $setQueueLiveStatus): void {
