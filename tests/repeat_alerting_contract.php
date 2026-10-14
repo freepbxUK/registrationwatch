@@ -87,14 +87,16 @@ if (!class_exists('CI_Email', false)) {
 }
 
 class ContractSQLitePDO extends PDO {
-	public function prepare(string $query, array $options = []): PDOStatement {
+	public function prepare($query, $options = null): PDOStatement {
 		$query = str_replace('INSERT IGNORE INTO', 'INSERT OR IGNORE INTO', $query);
 		if (strpos($query, 'ON DUPLICATE KEY UPDATE') !== false) {
-			$query = str_replace('ON DUPLICATE KEY UPDATE', 'ON CONFLICT(registration_id, alert_type) DO UPDATE SET', $query);
-			$query = preg_replace('/VALUES\(([a-z_][a-z0-9_]*)\)/i', 'excluded.$1', $query) ?? $query;
+			if (!preg_match('/^\s*INSERT\s+INTO\s+registrationwatch_alert_escalation\b/i', $query)) {
+				throw new RuntimeException('Contract SQLite adapter only supports escalation upserts.');
+			}
+			$query = preg_replace('/\s+ON DUPLICATE KEY UPDATE\s+[\s\S]*$/i', '', $query) ?? $query;
 		}
 
-		$statement = parent::prepare($query, $options);
+		$statement = parent::prepare($query, $options ?? []);
 		if ($statement === false) {
 			throw new RuntimeException('Unable to prepare contract SQLite statement.');
 		}
@@ -1839,6 +1841,28 @@ $makeQueueFixture = function (int $debounceSeconds, int $stormThreshold = 20, st
 			UNIQUE (registration_id, alert_type)
 		)'
 	);
+	$database->exec(
+		'CREATE TRIGGER registrationwatch_alert_escalation_upsert
+		BEFORE INSERT ON registrationwatch_alert_escalation
+		WHEN EXISTS (
+			SELECT 1 FROM registrationwatch_alert_escalation
+			WHERE registration_id = NEW.registration_id AND alert_type = NEW.alert_type
+		)
+		BEGIN
+			UPDATE registrationwatch_alert_escalation
+			SET registration_key = NEW.registration_key,
+				extension = NEW.extension,
+				history_id = NEW.history_id,
+				active_since = NEW.active_since,
+				last_alert_at = NEW.last_alert_at,
+				alert_count = NEW.alert_count,
+				next_due_at = NEW.next_due_at,
+				repeat_mode = NEW.repeat_mode,
+				updated_at = NEW.updated_at
+			WHERE registration_id = NEW.registration_id AND alert_type = NEW.alert_type;
+			SELECT RAISE(IGNORE);
+		END'
+	);
 	$settings = [
 		'alert_enabled' => '1',
 		'alert_recipients' => $alertRecipients,
@@ -1863,6 +1887,66 @@ $makeQueueFixture = function (int $debounceSeconds, int $stormThreshold = 20, st
 	$processQueue->setAccessible(true);
 	return [$database, $watch, $processQueue];
 };
+
+[$upsertDb] = $makeQueueFixture(0);
+$upsertSql = $upsertDb->prepare(
+	'INSERT INTO registrationwatch_alert_escalation
+		(registration_id, registration_key, extension, history_id, alert_type, active_since, last_alert_at, alert_count, next_due_at, repeat_mode, created_at, updated_at)
+	VALUES
+		(:registration_id, :registration_key, :extension, :history_id, :alert_type, :active_since, :last_alert_at, :alert_count, :next_due_at, :repeat_mode, :created_at, :updated_at)
+	ON DUPLICATE KEY UPDATE
+		registration_key = VALUES(registration_key),
+		extension = VALUES(extension),
+		history_id = VALUES(history_id),
+		active_since = VALUES(active_since),
+		last_alert_at = VALUES(last_alert_at),
+		alert_count = VALUES(alert_count),
+		next_due_at = VALUES(next_due_at),
+		repeat_mode = VALUES(repeat_mode),
+		updated_at = VALUES(updated_at)'
+);
+$upsertValues = [
+	':registration_id' => 1,
+	':registration_key' => 'old-registration-key',
+	':extension' => 'upsert-contract',
+	':history_id' => 10,
+	':alert_type' => 'unreachable',
+	':active_since' => '2026-06-15 10:00:00',
+	':last_alert_at' => '2026-06-15 10:00:00',
+	':alert_count' => 0,
+	':next_due_at' => '2026-06-15 10:05:00',
+	':repeat_mode' => '5m',
+	':created_at' => '2026-06-15 10:00:00',
+	':updated_at' => '2026-06-15 10:00:00',
+];
+$upsertSql->execute($upsertValues);
+$originalUpsertId = (int)$upsertDb->lastInsertId();
+$upsertValues[':registration_key'] = 'new-registration-key';
+$upsertValues[':extension'] = 'updated-upsert-contract';
+$upsertValues[':history_id'] = 11;
+$upsertValues[':active_since'] = '2026-06-15 10:01:00';
+$upsertValues[':last_alert_at'] = '2026-06-15 10:02:00';
+$upsertValues[':alert_count'] = 2;
+$upsertValues[':next_due_at'] = '2026-06-15 11:02:00';
+$upsertValues[':repeat_mode'] = 'hourly';
+$upsertValues[':created_at'] = '2026-06-15 10:01:00';
+$upsertValues[':updated_at'] = '2026-06-15 10:02:00';
+$upsertSql->execute($upsertValues);
+$updatedUpsert = $upsertDb->query('SELECT * FROM registrationwatch_alert_escalation')->fetch(PDO::FETCH_ASSOC);
+assert_true(is_array($updatedUpsert) && (int)$updatedUpsert['id'] === $originalUpsertId, 'MariaDB-style escalation upsert must preserve the existing row ID');
+assert_true($updatedUpsert['registration_key'] === 'new-registration-key' && $updatedUpsert['extension'] === 'updated-upsert-contract' && (int)$updatedUpsert['history_id'] === 11 && $updatedUpsert['active_since'] === '2026-06-15 10:01:00' && $updatedUpsert['last_alert_at'] === '2026-06-15 10:02:00' && (int)$updatedUpsert['alert_count'] === 2 && $updatedUpsert['next_due_at'] === '2026-06-15 11:02:00' && $updatedUpsert['repeat_mode'] === 'hourly' && $updatedUpsert['updated_at'] === '2026-06-15 10:02:00', 'MariaDB-style escalation upsert must update every assigned field');
+assert_true($updatedUpsert['created_at'] === '2026-06-15 10:00:00', 'MariaDB-style escalation upsert must preserve fields not assigned by its update clause');
+assert_true((int)$upsertDb->query('SELECT COUNT(*) FROM registrationwatch_alert_escalation')->fetchColumn() === 1, 'MariaDB-style escalation upsert must leave exactly one record');
+$upsertValues[':registration_id'] = 2;
+$upsertValues[':extension'] = null;
+$invalidInsertRejected = false;
+try {
+	$upsertSql->execute($upsertValues);
+} catch (PDOException $e) {
+	$invalidInsertRejected = true;
+}
+assert_true($invalidInsertRejected, 'invalid escalation insert must raise a database error instead of being ignored');
+
 	$insertQueueRegistration = function (PDO $database, string $extension, string $status = 'Reachable', string $repeatMode = 'never', ?string $sourceIp = null): array {
 	$key = $sourceIp !== null ? registration_key($extension, $sourceIp) : hash('sha256', $extension . '\0queue-test');
 	$stmt = $database->prepare('INSERT INTO registrationwatch_registrations (registration_key, extension, last_known_status, source_ip, enabled, repeat_mode) VALUES (?, ?, ?, ?, 1, ?)');
