@@ -31,10 +31,8 @@ falls back to a sensible `unknown system` label instead of failing email deliver
 
 ## Release Status
 
-Registration Watch 1.4.4 is in development for FreePBX 16 and 17. Final live
-PBX testing and module signing remain pending, so this version is not yet
-published or signed. The planned release date is 15 October 2026, subject to
-those final checks.
+Registration Watch 1.4.4 is a signed release supporting FreePBX/PBXact 16 and
+17.
 
 Use the `main` branch for stable releases. Development and release-candidate
 branches may contain incomplete or test-only changes.
@@ -286,8 +284,8 @@ grep -m1 '<version>' /var/www/html/admin/modules/registrationwatch/module.xml
 ### Signature warnings after updating an older unsigned release
 
 Some existing installations upgraded from an older unsigned Registration Watch
-release may initially show a signature warning after 1.4.4 is published and
-signed.
+release may initially show a signature warning after upgrading to signed
+Registration Watch 1.4.4.
 
 #### Module is Unsigned
 
@@ -665,10 +663,9 @@ fwconsole reload
 
 ## Release History
 
-### 1.4.4, patch release, planned 15 October 2026
+### 1.4.4, patch release, 15 October 2026
 
-This development release is prepared for publication after final live PBX
-testing and module signing.
+Released by `@kierknoby, Kieran Knowles-Byrne // FreePBX UK`.
 
 Debounce Delay now suppresses transient failures that recover within the
 configured delay. Status History retains actual transitions, and Alert History
