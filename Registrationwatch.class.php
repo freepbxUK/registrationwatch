@@ -4678,7 +4678,7 @@ class Registrationwatch implements \BMO {
 	}
 
 	private function getAlertHistory(): array {
-		return $this->getHistoryPage(
+		$page = $this->getHistoryPage(
 			'registrationwatch_alert_history',
 			'id, registration_id, registration_key, extension, contact_uri, history_id, alert_type, status, recipient, subject, sent_at, result, error',
 			'sent_at',
@@ -4695,6 +4695,50 @@ class Registrationwatch implements \BMO {
 			'ui_alert_history_sort_dir',
 			'alert_history'
 		);
+		$rows = $page['rows'];
+		foreach ($rows as &$row) {
+			$row['display_error'] = $this->formatAlertHistoryReasonForDisplay($row);
+		}
+		unset($row);
+		$page['rows'] = $rows;
+
+		return $page;
+	}
+
+	private function formatAlertHistoryReasonForDisplay(array $entry): string {
+		$error = (string)($entry['error'] ?? '');
+		if ($error === '') {
+			return (string)($entry['result'] ?? '') === 'storm_suppressed' ? _('Covered by Storm Summary') : '';
+		}
+		$alertType = (string)($entry['alert_type'] ?? '');
+		$result = (string)($entry['result'] ?? '');
+		$stormFailurePrefix = 'Storm Summary delivery failed';
+		if (($alertType === 'storm_summary' && $result === 'failed')
+			|| $result === 'storm_summary_failed'
+			|| strpos($error, $stormFailurePrefix) === 0
+		) {
+			$diagnostic = $error;
+			if (strpos($diagnostic, $stormFailurePrefix) === 0) {
+				$diagnostic = trim(substr($diagnostic, strlen($stormFailurePrefix)));
+				if (strpos($diagnostic, ':') === 0) {
+					$diagnostic = trim(substr($diagnostic, 1));
+				}
+			}
+			return _('Storm Summary delivery failed') . ($diagnostic !== '' ? ': ' . $diagnostic : '');
+		}
+
+		$displayReasons = [
+			'Debounce Delay' => _('Debounce Delay'),
+			'Original problem alert suppressed (Debounce Delay)' => _('Debounce Delay: recovery withheld because the problem notification was suppressed'),
+			'Monitoring snoozed' => _('Monitoring Snooze'),
+			'Original problem alert suppressed (Monitoring snoozed)' => _('Monitoring Snooze: recovery withheld because the problem notification was suppressed'),
+			'No successful problem notification delivered' => _('Recovery withheld: no successful problem notification was delivered'),
+		];
+		if (isset($displayReasons[$error])) {
+			return $displayReasons[$error];
+		}
+
+		return $error;
 	}
 
 	private function getHistoryPage(string $table, string $columns, string $defaultColumn, array $sortColumns, string $settingKey, string $settingDir, string $requestPrefix): array {

@@ -118,6 +118,10 @@ assert_true($registrationWatchCss !== false, 'Registration Watch CSS should be r
 assert_true(strpos($registrationWatchCss, "body:has(.registrationwatch) #page_body {\n\tdisplay: block !important;\n\twidth: 100% !important;\n\tmax-width: 100% !important;\n}") !== false, 'Registration Watch CSS should include exact scoped FreePBX page body override');
 assert_true(strpos($registrationWatchCss, ".registrationwatch #rw-topology-container {\n\toverflow-x: auto;\n\toverflow-y: hidden;\n\t-webkit-overflow-scrolling: touch;\n}") !== false, 'Registration Watch CSS should include exact scoped topology scroll container override');
 assert_true(strpos($registrationWatchCss, ".registrationwatch .rw-map-row-view {\n\twidth: max-content;\n\tmin-width: 100%;\n\tmargin-bottom: 0;\n}") !== false, 'Registration Watch CSS should include exact scoped map row width override');
+$registrationWatchView = file_get_contents(__DIR__ . '/../views/main.php');
+$registrationWatchJs = file_get_contents(__DIR__ . '/../assets/js/registrationwatch.js');
+assert_true($registrationWatchView !== false && strpos($registrationWatchView, 'data-sort-key="error"><?php echo _(\'Reason / Error\'); ?>') !== false && strpos($registrationWatchView, 'data-label="<?php echo _(\'Reason / Error\'); ?>"') !== false && strpos($registrationWatchView, '$displayAlertReason !== \'\' ? $displayAlertReason : \'-\'') !== false, 'initial Alert History rendering should use Reason / Error and retain a dash for an empty reason');
+assert_true($registrationWatchJs !== false && strpos($registrationWatchJs, 'data-label="Reason / Error"') !== false && strpos($registrationWatchJs, 'entry.display_error') !== false && strpos($registrationWatchJs, "value === null || value === undefined || value === '' ? '-' : String(value)") !== false, 'AJAX-rendered Alert History should use Reason / Error and retain a dash for an empty reason');
 
 function registration_key(string $extension, string $sourceIp, string $uaClass = ''): string {
 	$basis = strtolower(trim($extension)) . "\0" . strtolower(trim($sourceIp));
@@ -1686,7 +1690,11 @@ class TestableRegistrationwatch extends \FreePBX\modules\Registrationwatch {
 	}
 
 	public function getAlertSettings(): array {
-		return ['alert_recipients' => 'admin@example.invalid'];
+		return [
+			'alert_recipients' => 'admin@example.invalid',
+			'ui_alert_history_sort_key' => 'time',
+			'ui_alert_history_sort_dir' => 'desc',
+		];
 	}
 
 	public function normaliseRecipients(string $recipients): array {
@@ -1707,6 +1715,28 @@ $buildStorm = new ReflectionMethod($watch, 'buildStormSummaryEmail');
 $buildStorm->setAccessible(true);
 $getSystemIdentifier = new ReflectionMethod($watch, 'getSystemIdentifier');
 $getSystemIdentifier->setAccessible(true);
+$formatAlertHistoryReason = new ReflectionMethod($watch, 'formatAlertHistoryReasonForDisplay');
+$formatAlertHistoryReason->setAccessible(true);
+
+$alertHistoryReasonCases = [
+	[['result' => 'suppressed', 'error' => 'Debounce Delay'], 'Debounce Delay'],
+	[['result' => 'suppressed', 'error' => 'Original problem alert suppressed (Debounce Delay)'], 'Debounce Delay: recovery withheld because the problem notification was suppressed'],
+	[['result' => 'suppressed', 'error' => 'Monitoring snoozed'], 'Monitoring Snooze'],
+	[['result' => 'suppressed', 'error' => 'Original problem alert suppressed (Monitoring snoozed)'], 'Monitoring Snooze: recovery withheld because the problem notification was suppressed'],
+	[['result' => 'suppressed', 'error' => 'No successful problem notification delivered'], 'Recovery withheld: no successful problem notification was delivered'],
+	[['alert_type' => 'storm_summary', 'result' => 'failed', 'error' => 'CI_Email send failed.'], 'Storm Summary delivery failed: CI_Email send failed.'],
+	[['alert_type' => 'unreachable', 'result' => 'storm_summary_failed', 'error' => 'CI_Email send failed.'], 'Storm Summary delivery failed: CI_Email send failed.'],
+	[['alert_type' => 'recovery', 'result' => 'suppressed', 'error' => 'Storm Summary delivery failed: CI_Email send failed.'], 'Storm Summary delivery failed: CI_Email send failed.'],
+	[['alert_type' => 'unreachable', 'result' => 'storm_suppressed', 'error' => ''], 'Covered by Storm Summary'],
+	[['result' => 'sent', 'error' => ''], ''],
+	[['result' => 'failed', 'error' => 'CI_Email send failed.'], 'CI_Email send failed.'],
+	[['result' => 'suppressed', 'error' => 'Unrecognised historical reason'], 'Unrecognised historical reason'],
+];
+foreach ($alertHistoryReasonCases as $index => [$entry, $expectedReason]) {
+	$storedError = $entry['error'];
+	assert_true($formatAlertHistoryReason->invoke($watch, $entry) === $expectedReason, 'Alert History reason presentation mapping should match case ' . $index);
+	assert_true($entry['error'] === $storedError, 'Alert History reason presentation must not mutate the stored error value for case ' . $index);
+}
 
 $normalMessage = $buildAlert->invoke($watch, ['extension' => '2001', 'to_state' => 'Unreachable', 'reason' => 'threshold', 'created_at' => '2026-06-15 10:00:00'], 'unreachable');
 assert_true($getSystemIdentifier->invoke($watch) === 'MY-PBX-NAME', 'Registration Watch should retrieve the configured FreePBX System Identifier from FreePBX::Config()');
@@ -1887,6 +1917,32 @@ $makeQueueFixture = function (int $debounceSeconds, int $stormThreshold = 20, st
 	$processQueue->setAccessible(true);
 	return [$database, $watch, $processQueue];
 };
+
+[$presentationDb, $presentationWatch] = $makeQueueFixture(0);
+$presentationStorageCases = [
+	['history-display', 'recovery', 'suppressed', 'Original problem alert suppressed (Debounce Delay)', 'Debounce Delay: recovery withheld because the problem notification was suppressed'],
+	['storm-summary-failed', 'storm_summary', 'failed', 'CI_Email send failed.', 'Storm Summary delivery failed: CI_Email send failed.'],
+	['storm-individual-failed', 'unreachable', 'storm_summary_failed', 'CI_Email send failed.', 'Storm Summary delivery failed: CI_Email send failed.'],
+	['storm-recovery-failed', 'recovery', 'suppressed', 'Storm Summary delivery failed: CI_Email send failed.', 'Storm Summary delivery failed: CI_Email send failed.'],
+	['storm-summary-covered', 'unreachable', 'storm_suppressed', '', 'Covered by Storm Summary'],
+];
+$insertPresentationEntry = $presentationDb->prepare('INSERT INTO registrationwatch_alert_history (extension, alert_type, status, recipient, subject, sent_at, result, error) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
+foreach ($presentationStorageCases as $case) {
+	$insertPresentationEntry->execute([$case[0], $case[1], 'Unreachable', 'admin@example.invalid', 'Alert', '2026-06-15 10:00:00', $case[2], $case[3]]);
+}
+$getAlertHistory = new ReflectionMethod($presentationWatch, 'getAlertHistory');
+$getAlertHistory->setAccessible(true);
+$presentedHistory = $getAlertHistory->invoke($presentationWatch);
+$presentedByExtension = [];
+foreach ($presentedHistory['rows'] as $entry) {
+	$presentedByExtension[$entry['extension']] = $entry;
+}
+$storedErrorsAfterPresentation = $presentationDb->query('SELECT extension, error FROM registrationwatch_alert_history')->fetchAll(PDO::FETCH_KEY_PAIR);
+foreach ($presentationStorageCases as $case) {
+	$entry = $presentedByExtension[$case[0]] ?? [];
+	assert_true(($entry['display_error'] ?? null) === $case[4], 'Alert History retrieval should expose the mapped reason for ' . $case[0]);
+	assert_true(($entry['error'] ?? null) === $case[3] && ($storedErrorsAfterPresentation[$case[0]] ?? null) === $case[3], 'Alert History presentation must preserve the original database error for ' . $case[0]);
+}
 
 [$upsertDb] = $makeQueueFixture(0);
 $upsertSql = $upsertDb->prepare(

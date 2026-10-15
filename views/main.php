@@ -672,12 +672,13 @@ $_rwAssetVer = max(
 									<th data-sort-key="status"><?php echo _('Status'); ?> <span class="rw-sort-arrow"></span></th>
 									<th data-sort-key="recipient"><?php echo _('Recipient'); ?> <span class="rw-sort-arrow"></span></th>
 									<th data-sort-key="result"><?php echo _('Result'); ?> <span class="rw-sort-arrow"></span></th>
-									<th data-sort-key="error"><?php echo _('Error'); ?> <span class="rw-sort-arrow"></span></th>
+									<th data-sort-key="error"><?php echo _('Reason / Error'); ?> <span class="rw-sort-arrow"></span></th>
 									<th><?php echo _('Actions'); ?></th>
 								</tr>
 							</thead>
 							<tbody>
 								<?php foreach ($alertHistory as $entry): ?>
+									<?php $displayAlertReason = $entry['display_error'] ?? ($entry['error'] ?? ''); ?>
 									<tr data-history-id="<?php echo (int)($entry['id'] ?? 0); ?>" class="<?php echo $_rwAlertHistoryRowClass($entry['alert_type'] ?? ''); ?>">
 										<td data-label="<?php echo _('Time'); ?>"><?php echo htmlspecialchars($entry['sent_at'] ?: '-', ENT_QUOTES, 'UTF-8'); ?></td>
 										<td data-label="<?php echo _('Extension'); ?>"><?php echo htmlspecialchars($entry['extension'] ?: '-', ENT_QUOTES, 'UTF-8'); ?></td>
@@ -685,7 +686,7 @@ $_rwAssetVer = max(
 										<td data-label="<?php echo _('Status'); ?>"><?php echo htmlspecialchars($_rwDisplayLabel($entry['status'] ?? ''), ENT_QUOTES, 'UTF-8'); ?></td>
 										<td data-label="<?php echo _('Recipient'); ?>"><?php echo htmlspecialchars($entry['recipient'] ?: '-', ENT_QUOTES, 'UTF-8'); ?></td>
 										<td data-label="<?php echo _('Result'); ?>"><?php echo htmlspecialchars($_rwDisplayLabel($entry['result'] ?? ''), ENT_QUOTES, 'UTF-8'); ?></td>
-										<td data-label="<?php echo _('Error'); ?>"><?php echo htmlspecialchars($entry['error'] ?: '-', ENT_QUOTES, 'UTF-8'); ?></td>
+										<td data-label="<?php echo _('Reason / Error'); ?>"><?php echo htmlspecialchars($displayAlertReason !== '' ? $displayAlertReason : '-', ENT_QUOTES, 'UTF-8'); ?></td>
 										<td data-label="<?php echo _('Actions'); ?>">
 											<button type="button" class="btn btn-xs btn-danger rw-delete-alert-history" data-history-id="<?php echo (int)($entry['id'] ?? 0); ?>" title="<?php echo _('Delete Alert History row'); ?>">
 												<i class="fa fa-trash"></i>

@@ -508,23 +508,37 @@ Repeat alert modes:
 
 Stored legacy `fibonacci` repeat-mode values are treated as Escalating.
 
-Debounce Delay applies to alerting, not Status History. Status History continues
-to record observed registration state transitions. A problem must remain
-continuously unhealthy for the configured delay before its first alert is
-eligible; moving between Unreachable and Not registered does not restart the
-timer.
+Debounce Delay applies to alerting, not Status History. Status History records
+what happened; Alert History records what Registration Watch decided to do
+about it. Reconciliation records an observed transition to Unreachable or Not
+registered as soon as it detects the change.
 
-Returning to a healthy state before the delay expires suppresses the problem
-alert. No problem or recovery email is sent, no repeat or escalation state is
-started, and nothing from that incident is released later. Alert History records
-the decision as Result: Suppressed and Error: Debounce Delay. A debounce value
-of `0` retains immediate alerting. A genuine recovery cancels the active repeat
-schedule. Recovery alerts require a successful problem notification, whether it
-was an initial alert, a repeat, or coverage by a successful Storm Summary.
-Alert History also records an eligible recovery notification as suppressed when
-its corresponding problem notification was deliberately suppressed or no
-problem notification was successfully delivered. These audit entries do not
-send additional emails or change recovery eligibility.
+During the configured delay, the initial problem notification is awaiting
+eligibility; it has not been suppressed. No suppression entry therefore appears
+in Alert History while the timer is running. If the registration remains
+continuously unhealthy until the delay expires, the problem notification becomes
+eligible for processing. Alert History then records each recipient's decision:
+Sent, Failed, suppressed for another reason, or covered by a successfully
+delivered Storm Summary. Moving between Unreachable and Not registered does not
+restart the timer.
+
+If the registration recovers before the delay expires, the problem notification
+is suppressed. When problem and recovery alerts are enabled, Alert History
+records both recipient-specific decisions: the problem as Suppressed with
+reason `Debounce Delay`, and the withheld recovery as Suppressed with explanation
+`Debounce Delay: recovery withheld because the problem notification was
+suppressed`. These entries are recorded when recovery makes the decisions
+final, not while the problem is still awaiting eligibility. Neither email is
+sent, no repeat or escalation state is started, and nothing from the short
+incident is released later.
+
+A debounce value of `0` retains immediate alerting. A genuine recovery cancels
+the active repeat schedule. Recovery alerts require a successful problem
+notification, whether it was an initial alert, a repeat, or coverage by a
+successful Storm Summary. Alert History also records, per recipient, when a
+recovery notification is withheld because the corresponding problem
+notification was deliberately suppressed or not successfully delivered. These
+audit entries do not send additional emails or change recovery eligibility.
 
 Storm Threshold limits large batches of alerts generated in the same processing
 pass. It reduces email floods from sudden widespread registration changes, but
