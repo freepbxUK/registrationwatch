@@ -33,7 +33,7 @@ falls back to a sensible `unknown system` label instead of failing email deliver
 
 Registration Watch 1.4.4 is in development for FreePBX 16 and 17. Final live
 PBX testing and module signing remain pending, so this version is not yet
-published or signed. The planned release date is 14 October 2026, subject to
+published or signed. The planned release date is 15 October 2026, subject to
 those final checks.
 
 Use the `main` branch for stable releases. Development and release-candidate
@@ -521,6 +521,10 @@ the decision as Result: Suppressed and Error: Debounce Delay. A debounce value
 of `0` retains immediate alerting. A genuine recovery cancels the active repeat
 schedule. Recovery alerts require a successful problem notification, whether it
 was an initial alert, a repeat, or coverage by a successful Storm Summary.
+Alert History also records an eligible recovery notification as suppressed when
+its corresponding problem notification was deliberately suppressed or no
+problem notification was successfully delivered. These audit entries do not
+send additional emails or change recovery eligibility.
 
 Storm Threshold limits large batches of alerts generated in the same processing
 pass. It reduces email floods from sudden widespread registration changes, but
@@ -648,17 +652,20 @@ fwconsole reload
 
 ## Release History
 
-### 1.4.4, patch release, planned 14 October 2026
+### 1.4.4, patch release, planned 15 October 2026
 
 This development release is prepared for publication after final live PBX
 testing and module signing.
 
 Debounce Delay now suppresses transient failures that recover within the
 configured delay. Status History retains actual transitions, and Alert History
-records suppressed debounce decisions. Problem tracking and repeat schedules
-continue across Unreachable, Unknown and Not registered states. Unknown does not
-start a new problem alert or end an existing incident; due reminders are
-deferred without consuming their number until a known unhealthy state returns.
+records suppressed debounce decisions, including recovery notifications
+withheld because the corresponding problem notification was suppressed or not
+successfully delivered. These additional audit entries do not send emails or
+change recovery eligibility. Problem tracking and repeat schedules continue
+across Unreachable, Unknown and Not registered states. Unknown does not start a
+new problem alert or end an existing incident; due reminders are deferred
+without consuming their number until a known unhealthy state returns.
 Transitions into another alertable unhealthy state can still produce an
 initial notification when enabled, without restarting the incident's repeat
 schedule.

@@ -3298,6 +3298,7 @@ class Registrationwatch implements \BMO {
 		$recipients = $this->normaliseRecipients($settings['alert_recipients']);
 		$canSend = $settings['alert_enabled'] === '1' && (bool)$recipients;
 		$collectedAlerts = [];
+		$recoveryAuditCandidates = [];
 		$reminderCycles = [];
 
 		try {
@@ -3436,7 +3437,8 @@ class Registrationwatch implements \BMO {
 									$settings,
 									$recipients,
 									$canSend,
-									$collectedAlerts
+									$collectedAlerts,
+									$recoveryAuditCandidates
 								);
 							}
 							if ($this->isRecoveryTransition($transition)) {
@@ -3456,7 +3458,8 @@ class Registrationwatch implements \BMO {
 							$settings,
 							$recipients,
 							$canSend,
-							$collectedAlerts
+							$collectedAlerts,
+							$recoveryAuditCandidates
 						);
 					}
 				}
@@ -3467,6 +3470,7 @@ class Registrationwatch implements \BMO {
 			$reminderCycles = $due['cycles'];
 
 			$this->dispatchCollectedAlerts($collectedAlerts, $reminderCycles, $settings, $recipients, $now);
+			$this->recordSuppressedRecoveryAudits($recoveryAuditCandidates, $now);
 		} catch (\Exception $e) {
 			$this->logError('Alert processing failed: ' . $e->getMessage());
 		}
@@ -3941,7 +3945,7 @@ class Registrationwatch implements \BMO {
 		}
 	}
 
-	private function processAlertIncident(array $incident, ?array $recovery, int $debounceSeconds, string $staleCutoff, string $now, array $settings, array $recipients, bool $canSend, array &$collectedAlerts): void {
+	private function processAlertIncident(array $incident, ?array $recovery, int $debounceSeconds, string $staleCutoff, string $now, array $settings, array $recipients, bool $canSend, array &$collectedAlerts, array &$recoveryAuditCandidates): void {
 		$start = $incident['start'];
 		$problemTransitions = $incident['problem_transitions'] ?? [];
 		$problemTransition = $problemTransitions
@@ -4114,7 +4118,18 @@ class Registrationwatch implements \BMO {
 					break;
 				}
 			}
-			if (!$problemWasNotified || $this->hasRecordedAlertForRecipient((int)$recovery['id'], 'recovery', $recipient)) {
+			if ($this->hasRecordedAlertForRecipient((int)$recovery['id'], 'recovery', $recipient)) {
+				continue;
+			}
+			if (!$problemWasNotified) {
+				if ($priorActions) {
+					$recoveryAuditCandidates[] = [
+						'registration_id' => $registrationId,
+						'start_history_id' => $startId,
+						'recovery' => $recovery,
+						'recipient' => $recipient,
+					];
+				}
 				continue;
 			}
 
@@ -4155,15 +4170,88 @@ class Registrationwatch implements \BMO {
 		}
 	}
 
+	private function recordSuppressedRecoveryAudits(array $candidates, string $now): void {
+		foreach ($candidates as $candidate) {
+			$recovery = $candidate['recovery'];
+			$recipient = (string)$candidate['recipient'];
+			$recoveryId = (int)$recovery['id'];
+			if ($this->hasRecordedAlertForRecipient($recoveryId, 'recovery', $recipient)) {
+				continue;
+			}
+
+			$priorActions = $this->getProblemAlertResultsForIncident(
+				(int)$candidate['registration_id'],
+				(int)$candidate['start_history_id'],
+				$recoveryId,
+				$recipient
+			);
+			$suppressionReason = null;
+			$problemWasNotified = false;
+			foreach ($priorActions as $priorAction) {
+				$result = (string)$priorAction['result'];
+				if (in_array($result, ['sent', 'storm_suppressed'], true)) {
+					$problemWasNotified = true;
+					break;
+				}
+
+				if ($suppressionReason !== null) {
+					continue;
+				}
+				if ($result === 'failed') {
+					$suppressionReason = 'No successful problem notification delivered';
+				} elseif ($result === 'storm_summary_failed') {
+					$error = trim((string)($priorAction['error'] ?? ''));
+					$suppressionReason = 'Storm Summary delivery failed' . ($error !== '' ? ': ' . $error : '');
+				} elseif ($result === 'suppressed') {
+					$error = trim((string)($priorAction['error'] ?? ''));
+					if ($error === 'Debounce Delay') {
+						$suppressionReason = 'Original problem alert suppressed (Debounce Delay)';
+					} elseif ($error === 'Monitoring snoozed') {
+						$suppressionReason = 'Original problem alert suppressed (Monitoring snoozed)';
+					} elseif ($error !== '') {
+						$suppressionReason = 'Original problem alert suppressed (' . $error . ')';
+					} else {
+						$suppressionReason = 'Original problem alert suppressed';
+					}
+				}
+			}
+
+			if ($problemWasNotified || $suppressionReason === null) {
+				continue;
+			}
+
+			$email = $this->buildAlertEmail($recovery, 'recovery');
+			$reserved = $this->reserveAlertHistory([
+				'registration_id' => (int)$candidate['registration_id'],
+				'registration_key' => $recovery['registration_key'],
+				'extension' => $recovery['extension'],
+				'history_id' => $recoveryId,
+				'alert_type' => 'recovery',
+				'status' => $recovery['to_state'],
+				'contact_uri' => $recovery['contact_uri'] ?? null,
+				'recipient' => $recipient,
+				'subject' => $email['subject'],
+				'message' => $email['message'],
+				'sent_at' => $now,
+				'result' => 'pending',
+				'error' => null,
+			]);
+			if ($reserved) {
+				$this->updateReservedAlertHistory($recoveryId, 'recovery', $recipient, 'suppressed', $suppressionReason, $now);
+			}
+		}
+	}
+
 	private function getProblemAlertResultsForIncident(int $registrationId, int $startHistoryId, int $endHistoryId, string $recipient): array {
 		$stmt = $this->db()->prepare(
-			"SELECT history_id, result
+			"SELECT history_id, result, error
 			FROM registrationwatch_alert_history
 			WHERE registration_id = :registration_id
 				AND history_id >= :start_history_id
 				AND history_id <= :end_history_id
 				AND alert_type IN ('unreachable', 'not_registered')
-				AND recipient = :recipient"
+				AND recipient = :recipient
+			ORDER BY history_id DESC, sent_at DESC, id DESC"
 		);
 		$stmt->execute([
 			':registration_id' => $registrationId,

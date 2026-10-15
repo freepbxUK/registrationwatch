@@ -1985,16 +1985,28 @@ $setQueueLiveStatus = function (TestableRegistrationwatch $watch, string $extens
 
 [$flapDb, $flapWatch, $flapQueue] = $makeQueueFixture(300);
 [$flapId, $flapKey] = $insertQueueRegistration($flapDb, 'debounce-flap');
-$insertQueueTransition($flapDb, $flapId, $flapKey, 'debounce-flap', 'Reachable', 'Unreachable', '2026-06-15 08:12:07');
-$insertQueueTransition($flapDb, $flapId, $flapKey, 'debounce-flap', 'Unreachable', 'Reachable', '2026-06-15 08:12:22');
+$flapProblemId = $insertQueueTransition($flapDb, $flapId, $flapKey, 'debounce-flap', 'Reachable', 'Unreachable', '2026-06-15 08:12:07');
+$flapRecoveryId = $insertQueueTransition($flapDb, $flapId, $flapKey, 'debounce-flap', 'Unreachable', 'Reachable', '2026-06-15 08:12:22');
 $flapEmailDelta = $runQueueAndCountEmails($flapQueue, $flapWatch, '2026-06-15 08:17:30');
 $flapEmailDelta += $runQueueAndCountEmails($flapQueue, $flapWatch, '2026-06-15 08:22:30');
 assert_true((int)$flapDb->query("SELECT COUNT(*) FROM registrationwatch_status_history WHERE registration_id = {$flapId}")->fetchColumn() === 2, 'debounced flap should retain both observed Status History transitions');
-$flapDecision = $flapDb->query('SELECT alert_type, result, error FROM registrationwatch_alert_history')->fetch(PDO::FETCH_ASSOC);
-assert_true((int)$flapDb->query('SELECT COUNT(*) FROM registrationwatch_alert_history')->fetchColumn() === 1, 'short recovered flap should record one suppressed Alert History decision');
-assert_true(is_array($flapDecision) && $flapDecision['alert_type'] === 'unreachable' && $flapDecision['result'] === 'suppressed' && $flapDecision['error'] === 'Debounce Delay', 'debounce suppression should retain its reason in Alert History');
+$flapProblemDecision = $flapDb->query("SELECT registration_id, history_id, alert_type, recipient, result, error FROM registrationwatch_alert_history WHERE alert_type = 'unreachable'")->fetch(PDO::FETCH_ASSOC);
+$flapRecoveryDecision = $flapDb->query("SELECT registration_id, history_id, alert_type, recipient, result, error FROM registrationwatch_alert_history WHERE alert_type = 'recovery'")->fetch(PDO::FETCH_ASSOC);
+assert_true((int)$flapDb->query('SELECT COUNT(*) FROM registrationwatch_alert_history')->fetchColumn() === 2, 'short recovered flap should record both suppressed problem and recovery decisions');
+assert_true(is_array($flapProblemDecision) && (int)$flapProblemDecision['registration_id'] === $flapId && (int)$flapProblemDecision['history_id'] === $flapProblemId && $flapProblemDecision['recipient'] === 'admin@example.invalid' && $flapProblemDecision['result'] === 'suppressed' && $flapProblemDecision['error'] === 'Debounce Delay', 'debounce suppression should retain its reason and reference the problem transition');
+assert_true(is_array($flapRecoveryDecision) && (int)$flapRecoveryDecision['registration_id'] === $flapId && (int)$flapRecoveryDecision['history_id'] === $flapRecoveryId && $flapRecoveryDecision['recipient'] === 'admin@example.invalid' && $flapRecoveryDecision['result'] === 'suppressed' && $flapRecoveryDecision['error'] === 'Original problem alert suppressed (Debounce Delay)', 'withheld recovery should record its reason against the recovery transition');
 assert_true((int)$flapDb->query('SELECT COUNT(*) FROM registrationwatch_alert_escalation')->fetchColumn() === 0, 'short recovered flap should create no repeat escalation state');
-assert_true($flapEmailDelta === 0, 'short recovered flap should send no email');
+assert_true($flapEmailDelta === 0 && (int)$flapDb->query("SELECT COUNT(*) FROM registrationwatch_alert_history WHERE alert_type = 'recovery'")->fetchColumn() === 1, 'short recovered flap should send no email or create duplicate recovery decisions on replay');
+
+[$notRegisteredFlapDb, $notRegisteredFlapWatch, $notRegisteredFlapQueue] = $makeQueueFixture(300);
+[$notRegisteredFlapId, $notRegisteredFlapKey] = $insertQueueRegistration($notRegisteredFlapDb, 'debounce-not-registered-flap');
+$notRegisteredProblemId = $insertQueueTransition($notRegisteredFlapDb, $notRegisteredFlapId, $notRegisteredFlapKey, 'debounce-not-registered-flap', 'Reachable', 'Not registered', '2026-06-15 08:25:00');
+$notRegisteredRecoveryId = $insertQueueTransition($notRegisteredFlapDb, $notRegisteredFlapId, $notRegisteredFlapKey, 'debounce-not-registered-flap', 'Not registered', 'Reachable', '2026-06-15 08:25:15');
+$notRegisteredFlapEmails = $runQueueAndCountEmails($notRegisteredFlapQueue, $notRegisteredFlapWatch, '2026-06-15 08:30:00');
+$notRegisteredFlapRows = $notRegisteredFlapDb->query('SELECT registration_id, history_id, alert_type, recipient, result, error FROM registrationwatch_alert_history ORDER BY id')->fetchAll(PDO::FETCH_ASSOC);
+assert_true(count($notRegisteredFlapRows) === 2 && $notRegisteredFlapRows[0]['alert_type'] === 'not_registered' && (int)$notRegisteredFlapRows[0]['history_id'] === $notRegisteredProblemId && $notRegisteredFlapRows[0]['result'] === 'suppressed' && $notRegisteredFlapRows[0]['error'] === 'Debounce Delay', 'short Not registered outage should retain its debounce problem suppression');
+assert_true($notRegisteredFlapRows[1]['alert_type'] === 'recovery' && (int)$notRegisteredFlapRows[1]['registration_id'] === $notRegisteredFlapId && (int)$notRegisteredFlapRows[1]['history_id'] === $notRegisteredRecoveryId && $notRegisteredFlapRows[1]['recipient'] === 'admin@example.invalid' && $notRegisteredFlapRows[1]['result'] === 'suppressed' && $notRegisteredFlapRows[1]['error'] === 'Original problem alert suppressed (Debounce Delay)', 'short Not registered recovery should reference and explain the withheld recovery decision');
+assert_true($notRegisteredFlapEmails === 0, 'short Not registered outage should send neither problem nor recovery email');
 
 [$zeroHandoffDb, $zeroHandoffWatch, $zeroHandoffQueue] = $makeQueueFixture(0);
 [$zeroHandoffId, $zeroHandoffKey] = $insertQueueRegistration($zeroHandoffDb, 'debounce-zero-handoff');
@@ -2009,13 +2021,15 @@ assert_true($zeroHandoffEmailDelta === 2, 'zero-debounce Unreachable to Not regi
 [$transientHandoffId, $transientHandoffKey] = $insertQueueRegistration($transientHandoffDb, 'debounce-transient-handoff');
 $insertQueueTransition($transientHandoffDb, $transientHandoffId, $transientHandoffKey, 'debounce-transient-handoff', 'Reachable', 'Unreachable', '2026-06-15 08:30:00');
 $insertQueueTransition($transientHandoffDb, $transientHandoffId, $transientHandoffKey, 'debounce-transient-handoff', 'Unreachable', 'Not registered', '2026-06-15 08:31:00');
-$insertQueueTransition($transientHandoffDb, $transientHandoffId, $transientHandoffKey, 'debounce-transient-handoff', 'Not registered', 'Reachable', '2026-06-15 08:34:15');
+$transientRecoveryId = $insertQueueTransition($transientHandoffDb, $transientHandoffId, $transientHandoffKey, 'debounce-transient-handoff', 'Not registered', 'Reachable', '2026-06-15 08:34:15');
 $transientHandoffEmailDelta = $runQueueAndCountEmails($transientHandoffQueue, $transientHandoffWatch, '2026-06-15 08:34:15');
 $transientHandoffEmailDelta += $runQueueAndCountEmails($transientHandoffQueue, $transientHandoffWatch, '2026-06-15 08:36:00');
-$transientHandoffDecision = $transientHandoffDb->query('SELECT alert_type, result, error FROM registrationwatch_alert_history')->fetch(PDO::FETCH_ASSOC);
+$transientProblemDecision = $transientHandoffDb->query("SELECT history_id, alert_type, result, error FROM registrationwatch_alert_history WHERE alert_type = 'not_registered'")->fetch(PDO::FETCH_ASSOC);
+$transientRecoveryDecision = $transientHandoffDb->query("SELECT history_id, alert_type, result, error FROM registrationwatch_alert_history WHERE alert_type = 'recovery'")->fetch(PDO::FETCH_ASSOC);
 assert_true((int)$transientHandoffDb->query("SELECT COUNT(*) FROM registrationwatch_status_history WHERE registration_id = {$transientHandoffId}")->fetchColumn() === 3, 'transient unhealthy handoff should retain every factual transition');
-assert_true((int)$transientHandoffDb->query('SELECT COUNT(*) FROM registrationwatch_alert_history')->fetchColumn() === 1, 'transient unhealthy handoff should create exactly one audit decision');
-assert_true(is_array($transientHandoffDecision) && $transientHandoffDecision['alert_type'] === 'not_registered' && $transientHandoffDecision['result'] === 'suppressed' && $transientHandoffDecision['error'] === 'Debounce Delay', 'transient unhealthy handoff should record its debounce suppression reason');
+assert_true((int)$transientHandoffDb->query('SELECT COUNT(*) FROM registrationwatch_alert_history')->fetchColumn() === 2, 'transient unhealthy handoff should audit both suppressed notification decisions');
+assert_true(is_array($transientProblemDecision) && (int)$transientProblemDecision['history_id'] === 2 && $transientProblemDecision['alert_type'] === 'not_registered' && $transientProblemDecision['result'] === 'suppressed' && $transientProblemDecision['error'] === 'Debounce Delay', 'transient unhealthy handoff should record the latest problem suppression reason');
+assert_true(is_array($transientRecoveryDecision) && (int)$transientRecoveryDecision['history_id'] === $transientRecoveryId && $transientRecoveryDecision['alert_type'] === 'recovery' && $transientRecoveryDecision['result'] === 'suppressed' && $transientRecoveryDecision['error'] === 'Original problem alert suppressed (Debounce Delay)', 'transient unhealthy handoff should audit recovery against its own transition');
 assert_true((int)$transientHandoffDb->query('SELECT COUNT(*) FROM registrationwatch_alert_escalation')->fetchColumn() === 0, 'transient unhealthy handoff should not start escalation state');
 assert_true($transientHandoffEmailDelta === 0, 'transient unhealthy handoff should send neither problem nor recovery email');
 
@@ -2132,20 +2146,22 @@ $persistentDb->exec("UPDATE registrationwatch_registrations SET last_known_statu
 $persistentRecoveryEmailDelta = $runQueueAndCountEmails($persistentQueue, $persistentWatch, '2026-06-15 09:06:00');
 assert_true((int)$persistentDb->query("SELECT COUNT(*) FROM registrationwatch_alert_history WHERE alert_type = 'recovery'")->fetchColumn() === 1, 'recovery after a sent debounced alert should generate one recovery action');
 assert_true((int)$persistentDb->query("SELECT COUNT(*) FROM registrationwatch_alert_history WHERE alert_type = 'unreachable' AND reminder_n = 0")->fetchColumn() === 1, 'recovery processing must not re-emit the initial problem alert');
+assert_true((int)$persistentDb->query("SELECT COUNT(*) FROM registrationwatch_alert_history WHERE alert_type = 'recovery' AND result = 'suppressed'")->fetchColumn() === 0, 'successful initial problem delivery must not create a suppressed recovery decision');
 assert_true($persistentRecoveryEmailDelta === 1, 'recovery after a sent debounced alert should send exactly one recovery email for this incident');
 
 [$failedRecoveryDb, $failedRecoveryWatch, $failedRecoveryQueue] = $makeQueueFixture(300);
 [$failedRecoveryId, $failedRecoveryKey] = $insertQueueRegistration($failedRecoveryDb, 'debounce-failed-problem');
 $insertQueueTransition($failedRecoveryDb, $failedRecoveryId, $failedRecoveryKey, 'debounce-failed-problem', 'Reachable', 'Unreachable', '2026-06-15 12:00:00');
-$insertQueueTransition($failedRecoveryDb, $failedRecoveryId, $failedRecoveryKey, 'debounce-failed-problem', 'Unreachable', 'Reachable', '2026-06-15 12:05:00');
+$failedRecoveryTransitionId = $insertQueueTransition($failedRecoveryDb, $failedRecoveryId, $failedRecoveryKey, 'debounce-failed-problem', 'Unreachable', 'Reachable', '2026-06-15 12:05:00');
 CI_Email::$sendResults = [false];
 $failedInitialEmailDelta = $runQueueAndCountEmails($failedRecoveryQueue, $failedRecoveryWatch, '2026-06-15 12:05:00');
-$failedProblem = $failedRecoveryDb->query('SELECT alert_type, result FROM registrationwatch_alert_history')->fetch(PDO::FETCH_ASSOC);
+$failedProblem = $failedRecoveryDb->query("SELECT alert_type, result FROM registrationwatch_alert_history WHERE alert_type = 'unreachable'")->fetch(PDO::FETCH_ASSOC);
+$failedRecoveryDecision = $failedRecoveryDb->query("SELECT registration_id, history_id, recipient, result, error FROM registrationwatch_alert_history WHERE alert_type = 'recovery'")->fetch(PDO::FETCH_ASSOC);
 assert_true(is_array($failedProblem) && $failedProblem['alert_type'] === 'unreachable' && $failedProblem['result'] === 'failed', 'same-pass qualifying problem failure should retain its failed Alert History result');
-assert_true((int)$failedRecoveryDb->query("SELECT COUNT(*) FROM registrationwatch_alert_history WHERE alert_type = 'recovery'")->fetchColumn() === 0, 'a failed same-pass problem email must not produce a recovery action');
+assert_true(is_array($failedRecoveryDecision) && (int)$failedRecoveryDecision['registration_id'] === $failedRecoveryId && (int)$failedRecoveryDecision['history_id'] === $failedRecoveryTransitionId && $failedRecoveryDecision['recipient'] === 'admin@example.invalid' && $failedRecoveryDecision['result'] === 'suppressed' && $failedRecoveryDecision['error'] === 'No successful problem notification delivered', 'failed same-pass problem email should produce a recipient-specific suppressed recovery audit');
 assert_true($failedInitialEmailDelta === 1, 'a failed same-pass problem must be the only attempted email');
 $failedLaterEmailDelta = $runQueueAndCountEmails($failedRecoveryQueue, $failedRecoveryWatch, '2026-06-15 12:05:10');
-assert_true((int)$failedRecoveryDb->query("SELECT COUNT(*) FROM registrationwatch_alert_history WHERE alert_type = 'recovery'")->fetchColumn() === 0 && $failedLaterEmailDelta === 0, 'a later queue pass must not release recovery after the failed initial problem email');
+assert_true((int)$failedRecoveryDb->query("SELECT COUNT(*) FROM registrationwatch_alert_history WHERE alert_type = 'recovery'")->fetchColumn() === 1 && $failedLaterEmailDelta === 0, 'a later queue pass must not release recovery or duplicate its suppression audit after a failed initial problem email');
 
 [$unknownImmediateDb, $unknownImmediateWatch, $unknownImmediateQueue] = $makeQueueFixture(0);
 [$unknownImmediateId, $unknownImmediateKey] = $insertQueueRegistration($unknownImmediateDb, 'debounce-unknown-immediate', 'Unreachable');
@@ -2177,17 +2193,20 @@ $stormProblemCalls = array_slice(CI_Email::$sentMessages, $stormProblemEmailStar
 $stormProblemResults = $stormRecoveryDb->query("SELECT recipient, result FROM registrationwatch_alert_history WHERE alert_type = 'unreachable' ORDER BY recipient")->fetchAll(PDO::FETCH_KEY_PAIR);
 assert_true(($stormProblemResults['primary@example.invalid'] ?? '') === 'storm_suppressed' && ($stormProblemResults['secondary@example.invalid'] ?? '') === 'storm_summary_failed', 'problem Storm Summary outcome should remain recipient-specific');
 assert_true($stormProblemEmailDelta === 2 && array_column($stormProblemCalls, 'recipient') === ['primary@example.invalid', 'secondary@example.invalid'], 'the original problem Storm Summary should attempt one delivery for each qualifying recipient');
-$insertQueueTransition($stormRecoveryDb, $stormRecoveryId, $stormRecoveryKey, 'debounce-storm-recovery', 'Unreachable', 'Reachable', '2026-06-15 14:01:00');
+$stormRecoveryTransitionId = $insertQueueTransition($stormRecoveryDb, $stormRecoveryId, $stormRecoveryKey, 'debounce-storm-recovery', 'Unreachable', 'Reachable', '2026-06-15 14:01:00');
 $stormRecoveryDb->exec("UPDATE registrationwatch_registrations SET last_known_status = 'Reachable' WHERE id = {$stormRecoveryId}");
 CI_Email::$sendResults = [true, true];
 $stormRecoveryEmailStart = count(CI_Email::$sentMessages);
 $stormRecoveryEmailDelta = $runQueueAndCountEmails($stormRecoveryQueue, $stormRecoveryWatch, '2026-06-15 14:01:00');
 $stormRecoveryCalls = array_slice(CI_Email::$sentMessages, $stormRecoveryEmailStart);
 $stormRecoveryResults = $stormRecoveryDb->query("SELECT recipient, result FROM registrationwatch_alert_history WHERE alert_type = 'recovery' ORDER BY recipient")->fetchAll(PDO::FETCH_KEY_PAIR);
+$failedStormRecovery = $stormRecoveryDb->query("SELECT registration_id, history_id, recipient, result, error FROM registrationwatch_alert_history WHERE alert_type = 'recovery' AND recipient = 'secondary@example.invalid'")->fetch(PDO::FETCH_ASSOC);
 assert_true(($stormRecoveryResults['primary@example.invalid'] ?? '') === 'storm_suppressed', 'successfully storm-suppressed problem should authorize a storm-processed recovery for that recipient');
-assert_true(!isset($stormRecoveryResults['secondary@example.invalid']), 'failed Storm Summary must not authorize recovery for that recipient');
-assert_true((int)$stormRecoveryDb->query("SELECT COUNT(*) FROM registrationwatch_alert_history WHERE alert_type = 'recovery'")->fetchColumn() === 1 && $stormRecoveryDb->query("SELECT recipient FROM registrationwatch_alert_history WHERE alert_type = 'recovery'")->fetchColumn() === 'primary@example.invalid', 'recovery Alert History should exist only for the successfully notified recipient');
+assert_true(($stormRecoveryResults['secondary@example.invalid'] ?? '') === 'suppressed' && is_array($failedStormRecovery) && (int)$failedStormRecovery['registration_id'] === $stormRecoveryId && (int)$failedStormRecovery['history_id'] === $stormRecoveryTransitionId && $failedStormRecovery['error'] === 'Storm Summary delivery failed: CI_Email send failed.', 'failed Storm Summary should produce an accurate recovery suppression audit without authorizing recovery');
+assert_true((int)$stormRecoveryDb->query("SELECT COUNT(*) FROM registrationwatch_alert_history WHERE alert_type = 'recovery'")->fetchColumn() === 2 && $stormRecoveryDb->query("SELECT recipient FROM registrationwatch_alert_history WHERE alert_type = 'recovery' AND result = 'storm_suppressed'")->fetchColumn() === 'primary@example.invalid', 'recovery decisions should remain independent for successful and failed problem recipients');
 assert_true($stormRecoveryEmailDelta === 1 && count($stormRecoveryCalls) === 1 && $stormRecoveryCalls[0]['recipient'] === 'primary@example.invalid', 'only the successful problem recipient should receive the recovery Storm Summary');
+$stormRecoveryReplayEmails = $runQueueAndCountEmails($stormRecoveryQueue, $stormRecoveryWatch, '2026-06-15 14:01:10');
+assert_true($stormRecoveryReplayEmails === 0 && (int)$stormRecoveryDb->query("SELECT COUNT(*) FROM registrationwatch_alert_history WHERE alert_type = 'recovery'")->fetchColumn() === 2, 'replaying mixed Storm Summary outcomes must not send or duplicate recovery decisions');
 assert_true(strpos($stormRecoveryCalls[0]['subject'], 'Storm Summary') !== false && strpos($stormRecoveryCalls[0]['message'], 'debounce-storm-recovery - recovered to Reachable') !== false, 'primary recovery summary should contain the eligible recovery alert');
 
 $recipientSummaryRecipients = $stormRecoveryRecipients . ', observer@example.invalid';
@@ -2272,12 +2291,39 @@ $insertQueueTransition($staleDb, $staleId, $staleKey, 'debounce-stale', 'Reachab
 $runQueue($staleQueue, $staleWatch, '2026-06-15 10:00:00');
 assert_true((int)$staleDb->query('SELECT COUNT(*) FROM registrationwatch_alert_history')->fetchColumn() === 0, 'stale unhealthy transition must not be replayed after the freshness window');
 
+[$ongoingSnoozedDb, $ongoingSnoozedWatch, $ongoingSnoozedQueue] = $makeQueueFixture(0, 20, date('Y-m-d H:i:s', time() + 3600));
+[$ongoingSnoozedId, $ongoingSnoozedKey] = $insertQueueRegistration($ongoingSnoozedDb, 'debounce-snoozed-ongoing', 'Unreachable');
+$insertQueueTransition($ongoingSnoozedDb, $ongoingSnoozedId, $ongoingSnoozedKey, 'debounce-snoozed-ongoing', 'Reachable', 'Unreachable', '2026-06-15 10:00:00');
+$runQueue($ongoingSnoozedQueue, $ongoingSnoozedWatch, '2026-06-15 10:01:00');
+$ongoingSnoozedResult = $ongoingSnoozedDb->query('SELECT result FROM registrationwatch_alert_history')->fetchColumn();
+assert_true((string)$ongoingSnoozedResult === 'suppressed', 'ongoing snoozed eligible alert should retain existing suppression behavior; got ' . var_export($ongoingSnoozedResult, true));
+
 [$snoozedDb, $snoozedWatch, $snoozedQueue] = $makeQueueFixture(0, 20, date('Y-m-d H:i:s', time() + 3600));
 [$snoozedId, $snoozedKey] = $insertQueueRegistration($snoozedDb, 'debounce-snoozed', 'Unreachable');
-$insertQueueTransition($snoozedDb, $snoozedId, $snoozedKey, 'debounce-snoozed', 'Reachable', 'Unreachable', '2026-06-15 10:01:00');
-$runQueue($snoozedQueue, $snoozedWatch, '2026-06-15 10:01:00');
-$snoozedResult = $snoozedDb->query('SELECT result FROM registrationwatch_alert_history')->fetchColumn();
-assert_true((string)$snoozedResult === 'suppressed', 'snoozed eligible alert should retain existing suppression behavior; got ' . var_export($snoozedResult, true));
+$snoozedProblemId = $insertQueueTransition($snoozedDb, $snoozedId, $snoozedKey, 'debounce-snoozed', 'Reachable', 'Unreachable', '2026-06-15 10:01:00');
+$snoozedRecoveryId = $insertQueueTransition($snoozedDb, $snoozedId, $snoozedKey, 'debounce-snoozed', 'Unreachable', 'Reachable', '2026-06-15 10:02:00');
+$snoozedEmailDelta = $runQueueAndCountEmails($snoozedQueue, $snoozedWatch, '2026-06-15 10:02:00');
+$snoozedProblem = $snoozedDb->query("SELECT history_id, result, error FROM registrationwatch_alert_history WHERE alert_type = 'unreachable'")->fetch(PDO::FETCH_ASSOC);
+$snoozedRecovery = $snoozedDb->query("SELECT history_id, result, error FROM registrationwatch_alert_history WHERE alert_type = 'recovery'")->fetch(PDO::FETCH_ASSOC);
+assert_true(is_array($snoozedProblem) && (int)$snoozedProblem['history_id'] === $snoozedProblemId && $snoozedProblem['result'] === 'suppressed' && $snoozedProblem['error'] === 'Monitoring snoozed', 'snoozed eligible problem alert should retain existing suppression behavior');
+assert_true(is_array($snoozedRecovery) && (int)$snoozedRecovery['history_id'] === $snoozedRecoveryId && $snoozedRecovery['result'] === 'suppressed' && $snoozedRecovery['error'] === 'Original problem alert suppressed (Monitoring snoozed)', 'recovery withheld by Monitoring Snooze should be audited with its reason');
+assert_true($snoozedEmailDelta === 0, 'Monitoring Snooze should continue to send neither problem nor recovery email');
+
+[$recoveryDisabledDb, $recoveryDisabledWatch, $recoveryDisabledQueue] = $makeQueueFixture(0);
+$recoveryDisabledDb->prepare("UPDATE registrationwatch_settings SET setting_value = '0' WHERE setting_key = 'alert_on_recovery'")->execute();
+[$recoveryDisabledId, $recoveryDisabledKey] = $insertQueueRegistration($recoveryDisabledDb, 'recovery-disabled');
+$insertQueueTransition($recoveryDisabledDb, $recoveryDisabledId, $recoveryDisabledKey, 'recovery-disabled', 'Reachable', 'Unreachable', '2026-06-15 10:03:00');
+$insertQueueTransition($recoveryDisabledDb, $recoveryDisabledId, $recoveryDisabledKey, 'recovery-disabled', 'Unreachable', 'Reachable', '2026-06-15 10:04:00');
+$recoveryDisabledEmailDelta = $runQueueAndCountEmails($recoveryDisabledQueue, $recoveryDisabledWatch, '2026-06-15 10:04:00');
+assert_true($recoveryDisabledEmailDelta === 1 && (int)$recoveryDisabledDb->query("SELECT COUNT(*) FROM registrationwatch_alert_history WHERE alert_type = 'recovery'")->fetchColumn() === 0, 'disabled recovery notifications must not send or create recovery suppression records');
+
+[$monitoringDisabledDb, $monitoringDisabledWatch, $monitoringDisabledQueue] = $makeQueueFixture(0);
+[$monitoringDisabledId, $monitoringDisabledKey] = $insertQueueRegistration($monitoringDisabledDb, 'monitoring-disabled');
+$insertQueueTransition($monitoringDisabledDb, $monitoringDisabledId, $monitoringDisabledKey, 'monitoring-disabled', 'Reachable', 'Unreachable', '2026-06-15 10:05:00');
+$insertQueueTransition($monitoringDisabledDb, $monitoringDisabledId, $monitoringDisabledKey, 'monitoring-disabled', 'Unreachable', 'Reachable', '2026-06-15 10:06:00');
+$monitoringDisabledDb->prepare('UPDATE registrationwatch_registrations SET enabled = 0 WHERE id = ?')->execute([$monitoringDisabledId]);
+$monitoringDisabledEmailDelta = $runQueueAndCountEmails($monitoringDisabledQueue, $monitoringDisabledWatch, '2026-06-15 10:06:00');
+assert_true($monitoringDisabledEmailDelta === 0 && (int)$monitoringDisabledDb->query('SELECT COUNT(*) FROM registrationwatch_alert_history')->fetchColumn() === 0, 'disabled monitoring must not create retrospective notification or recovery audit records');
 
 [$stormDb, $stormWatch, $stormQueue] = $makeQueueFixture(0, 2);
 [$stormIdA, $stormKeyA] = $insertQueueRegistration($stormDb, 'debounce-storm-a', 'Unreachable');
@@ -2387,6 +2433,7 @@ $runConfirmedRepeatRegression('recovery after successful repeat', function () us
 	assert_true($runQueueAndCountEmails($queue, $watch, '2026-06-15 09:12:00') === 1, 'successful repeat should authorize one recovery email');
 	$recovery = $database->query("SELECT result FROM registrationwatch_alert_history WHERE registration_id = {$registrationId} AND alert_type = 'recovery'")->fetchColumn();
 	assert_true($recovery === 'sent', 'recovery Alert History should record successful delivery after a successful repeat');
+	assert_true((int)$database->query("SELECT COUNT(*) FROM registrationwatch_alert_history WHERE registration_id = {$registrationId} AND alert_type = 'recovery' AND result = 'suppressed'")->fetchColumn() === 0, 'successful repeat notification must continue to authorize recovery without a suppression record');
 	assert_true((int)$database->query("SELECT COUNT(*) FROM registrationwatch_alert_escalation WHERE registration_id = {$registrationId}")->fetchColumn() === 0, 'genuine recovery should cancel the active repeat schedule');
 });
 
@@ -2540,6 +2587,7 @@ $runConfirmedRepeatRegression('Storm Summary repeats authorize recovery', functi
 	assert_true($runQueueAndCountEmails($queue, $watch, '2026-06-15 09:12:00') === 1, 'successful repeat summary should authorize recovery coverage');
 	$recoveryResult = $database->query("SELECT result FROM registrationwatch_alert_history WHERE registration_id = {$registrationId} AND alert_type = 'recovery'")->fetchColumn();
 	assert_true($recoveryResult === 'storm_suppressed', 'recovery should continue using the existing Storm Summary behavior');
+	assert_true((int)$database->query("SELECT COUNT(*) FROM registrationwatch_alert_history WHERE registration_id = {$registrationId} AND alert_type = 'recovery' AND result = 'suppressed'")->fetchColumn() === 0, 'successful repeat Storm Summary coverage must not create a suppressed recovery decision');
 });
 
 $runConfirmedRepeatRegression('recovery cleanup is incident-scoped', function () use ($makeQueueFixture, $insertQueueRegistration, $insertQueueTransition, $runQueue): void {
