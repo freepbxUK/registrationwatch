@@ -118,10 +118,18 @@ assert_true($registrationWatchCss !== false, 'Registration Watch CSS should be r
 assert_true(strpos($registrationWatchCss, "body:has(.registrationwatch) #page_body {\n\tdisplay: block !important;\n\twidth: 100% !important;\n\tmax-width: 100% !important;\n}") !== false, 'Registration Watch CSS should include exact scoped FreePBX page body override');
 assert_true(strpos($registrationWatchCss, ".registrationwatch #rw-topology-container {\n\toverflow-x: auto;\n\toverflow-y: hidden;\n\t-webkit-overflow-scrolling: touch;\n}") !== false, 'Registration Watch CSS should include exact scoped topology scroll container override');
 assert_true(strpos($registrationWatchCss, ".registrationwatch .rw-map-row-view {\n\twidth: max-content;\n\tmin-width: 100%;\n\tmargin-bottom: 0;\n}") !== false, 'Registration Watch CSS should include exact scoped map row width override');
+assert_true(strpos($registrationWatchCss, ".registrationwatch #rw-map-view-toggle .btn:focus,\n.registrationwatch #rw-map-view-toggle .btn:active {\n\tbackground-color: #fff;") !== false, 'an unselected map view button must stay neutral when focused or pressed');
+assert_true(strpos($registrationWatchCss, ".registrationwatch #rw-map-view-toggle .btn.active:active {\n\tbackground-color: #5cb85c;") !== false, 'only the active map view button should be highlighted green');
 $registrationWatchView = file_get_contents(__DIR__ . '/../views/main.php');
 $registrationWatchJs = file_get_contents(__DIR__ . '/../assets/js/registrationwatch.js');
 assert_true($registrationWatchView !== false && strpos($registrationWatchView, 'data-sort-key="error"><?php echo _(\'Reason / Error\'); ?>') !== false && strpos($registrationWatchView, 'data-label="<?php echo _(\'Reason / Error\'); ?>"') !== false && strpos($registrationWatchView, '$displayAlertReason !== \'\' ? $displayAlertReason : \'-\'') !== false, 'initial Alert History rendering should use Reason / Error and retain a dash for an empty reason');
 assert_true($registrationWatchJs !== false && strpos($registrationWatchJs, 'data-label="Reason / Error"') !== false && strpos($registrationWatchJs, 'entry.display_error') !== false && strpos($registrationWatchJs, "value === null || value === undefined || value === '' ? '-' : String(value)") !== false, 'AJAX-rendered Alert History should use Reason / Error and retain a dash for an empty reason');
+assert_true(strpos($registrationWatchView, "mapLimitSelect.addEventListener('change'") !== false, 'Registration Status Map should re-render from a native change event on its Show limit');
+assert_true(strpos($registrationWatchJs, "mapLimit.dispatchEvent(new Event('change'))") !== false && strpos($registrationWatchJs, "$('#rw-map-limit').val(currentLimit).trigger('change')") === false, 'shared Show limit must dispatch a native change event so the map re-renders; jQuery trigger() does not reach native listeners');
+assert_true(strpos($registrationWatchView, 'let statusMapViewMode = <?php echo json_encode($uiMapViewMode); ?>;') !== false, 'map view mode should be restored from the persisted ui_map_view_mode setting');
+foreach (['card', 'row'] as $mapViewMode) {
+	assert_true(strpos($registrationWatchView, "statusMapViewMode = '" . $mapViewMode . "';\n\t\t\t\tif (window.rwSaveUiSetting) { window.rwSaveUiSetting('ui_map_view_mode', '" . $mapViewMode . "'); }\n\t\t\t\tapplyViewToggleState();\n\t\t\t\trenderRegistrationMap(latestMapRegistrations);") !== false, 'the ' . $mapViewMode . ' view button should switch mode, persist it, update the active button and re-render immediately');
+}
 
 function registration_key(string $extension, string $sourceIp, string $uaClass = ''): string {
 	$basis = strtolower(trim($extension)) . "\0" . strtolower(trim($sourceIp));

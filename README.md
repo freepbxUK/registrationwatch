@@ -691,6 +691,9 @@ completed recovery boundaries. Repeat reminders also honour their corresponding
 alert-type settings. Expanded regression coverage and native PDO MySQL prepared
 statement compatibility checks pass.
 
+Cards/Rows highlighting now works consistently across FreePBX and PBXact. Changing
+the shared Show selector immediately updates the Registration Status Map.
+
 ### 1.4.3, patch release, 10 September 2026
 
 Released by `@kierknoby, Kieran Knowles-Byrne // FreePBX UK`.

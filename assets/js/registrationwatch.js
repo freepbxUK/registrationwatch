@@ -1592,8 +1592,11 @@
                         }
                 });
 
-                if (triggerMapChange && $('#rw-map-limit').length) {
-                        $('#rw-map-limit').val(currentLimit).trigger('change');
+                var mapLimit = document.getElementById('rw-map-limit');
+                if (triggerMapChange && mapLimit) {
+                        mapLimit.value = currentLimit;
+                        // The map renderer listens natively; jQuery trigger() does not dispatch native change events.
+                        mapLimit.dispatchEvent(new Event('change'));
                 }
         }
 

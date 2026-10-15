@@ -378,6 +378,59 @@ body:has(.registrationwatch) #page_body {
 	max-width: 160px;
 }
 
+/* Highlight follows only .active; theme :focus/:active states must not mark an unselected view. */
+.registrationwatch #rw-map-view-toggle .btn,
+.registrationwatch #rw-map-view-toggle .btn:hover,
+.registrationwatch #rw-map-view-toggle .btn:focus,
+.registrationwatch #rw-map-view-toggle .btn:active {
+	background-color: #fff;
+	background-image: none;
+	border-color: #ccc;
+	color: #333;
+	box-shadow: none;
+	outline: none;
+}
+
+.registrationwatch #rw-map-view-toggle .btn:hover {
+	background-color: #f5f5f5;
+}
+
+.registrationwatch #rw-map-view-toggle .btn.active,
+.registrationwatch #rw-map-view-toggle .btn.active:hover,
+.registrationwatch #rw-map-view-toggle .btn.active:focus,
+.registrationwatch #rw-map-view-toggle .btn.active:active {
+	background-color: #5cb85c;
+	border-color: #4cae4c;
+	color: #fff;
+	box-shadow: none;
+}
+
+.registrationwatch #rw-map-view-toggle .btn:not(.active),
+.registrationwatch #rw-map-view-toggle .btn:not(.active):hover,
+.registrationwatch #rw-map-view-toggle .btn:not(.active):focus,
+.registrationwatch #rw-map-view-toggle .btn:not(.active):active {
+	background-color: #fff !important;
+	background-image: none !important;
+	color: #333 !important;
+}
+
+.registrationwatch #rw-map-view-toggle .btn.active,
+.registrationwatch #rw-map-view-toggle .btn.active:hover,
+.registrationwatch #rw-map-view-toggle .btn.active:focus,
+.registrationwatch #rw-map-view-toggle .btn.active:active {
+	background-color: #5cb85c !important;
+	background-image: none !important;
+	border-color: #4cae4c !important;
+	color: #fff !important;
+	box-shadow: none !important;
+	opacity: 1 !important;
+}
+
+.registrationwatch #rw-map-view-toggle .btn:focus-visible {
+	outline: 2px solid #66afe9;
+	outline-offset: 1px;
+}
+
 .registrationwatch th[data-sort-key] {
 	cursor: pointer;
 	user-select: none;
