@@ -1719,11 +1719,11 @@ $formatAlertHistoryReason = new ReflectionMethod($watch, 'formatAlertHistoryReas
 $formatAlertHistoryReason->setAccessible(true);
 
 $alertHistoryReasonCases = [
-	[['result' => 'suppressed', 'error' => 'Debounce Delay'], 'Debounce Delay'],
-	[['result' => 'suppressed', 'error' => 'Original problem alert suppressed (Debounce Delay)'], 'Debounce Delay: recovery withheld because the problem notification was suppressed'],
-	[['result' => 'suppressed', 'error' => 'Monitoring snoozed'], 'Monitoring Snooze'],
-	[['result' => 'suppressed', 'error' => 'Original problem alert suppressed (Monitoring snoozed)'], 'Monitoring Snooze: recovery withheld because the problem notification was suppressed'],
-	[['result' => 'suppressed', 'error' => 'No successful problem notification delivered'], 'Recovery withheld: no successful problem notification was delivered'],
+	[['alert_type' => 'not_registered', 'result' => 'suppressed', 'error' => 'Debounce Delay'], 'Debounce Delay'],
+	[['alert_type' => 'recovery', 'result' => 'suppressed', 'error' => 'Original problem alert suppressed (Debounce Delay)'], 'Debounce Delay'],
+	[['alert_type' => 'unreachable', 'result' => 'suppressed', 'error' => 'Monitoring snoozed'], 'Monitoring Snooze'],
+	[['alert_type' => 'recovery', 'result' => 'suppressed', 'error' => 'Original problem alert suppressed (Monitoring snoozed)'], 'Monitoring Snooze'],
+	[['alert_type' => 'recovery', 'result' => 'suppressed', 'error' => 'No successful problem notification delivered'], 'Problem notification not delivered'],
 	[['alert_type' => 'storm_summary', 'result' => 'failed', 'error' => 'CI_Email send failed.'], 'Storm Summary delivery failed: CI_Email send failed.'],
 	[['alert_type' => 'unreachable', 'result' => 'storm_summary_failed', 'error' => 'CI_Email send failed.'], 'Storm Summary delivery failed: CI_Email send failed.'],
 	[['alert_type' => 'recovery', 'result' => 'suppressed', 'error' => 'Storm Summary delivery failed: CI_Email send failed.'], 'Storm Summary delivery failed: CI_Email send failed.'],
@@ -1920,7 +1920,11 @@ $makeQueueFixture = function (int $debounceSeconds, int $stormThreshold = 20, st
 
 [$presentationDb, $presentationWatch] = $makeQueueFixture(0);
 $presentationStorageCases = [
-	['history-display', 'recovery', 'suppressed', 'Original problem alert suppressed (Debounce Delay)', 'Debounce Delay: recovery withheld because the problem notification was suppressed'],
+	['history-debounce-problem', 'not_registered', 'suppressed', 'Debounce Delay', 'Debounce Delay'],
+	['history-debounce-recovery', 'recovery', 'suppressed', 'Original problem alert suppressed (Debounce Delay)', 'Debounce Delay'],
+	['history-snooze-problem', 'unreachable', 'suppressed', 'Monitoring snoozed', 'Monitoring Snooze'],
+	['history-snooze-recovery', 'recovery', 'suppressed', 'Original problem alert suppressed (Monitoring snoozed)', 'Monitoring Snooze'],
+	['history-no-problem-delivery', 'recovery', 'suppressed', 'No successful problem notification delivered', 'Problem notification not delivered'],
 	['storm-summary-failed', 'storm_summary', 'failed', 'CI_Email send failed.', 'Storm Summary delivery failed: CI_Email send failed.'],
 	['storm-individual-failed', 'unreachable', 'storm_summary_failed', 'CI_Email send failed.', 'Storm Summary delivery failed: CI_Email send failed.'],
 	['storm-recovery-failed', 'recovery', 'suppressed', 'Storm Summary delivery failed: CI_Email send failed.', 'Storm Summary delivery failed: CI_Email send failed.'],

@@ -4729,10 +4729,10 @@ class Registrationwatch implements \BMO {
 
 		$displayReasons = [
 			'Debounce Delay' => _('Debounce Delay'),
-			'Original problem alert suppressed (Debounce Delay)' => _('Debounce Delay: recovery withheld because the problem notification was suppressed'),
+			'Original problem alert suppressed (Debounce Delay)' => _('Debounce Delay'),
 			'Monitoring snoozed' => _('Monitoring Snooze'),
-			'Original problem alert suppressed (Monitoring snoozed)' => _('Monitoring Snooze: recovery withheld because the problem notification was suppressed'),
-			'No successful problem notification delivered' => _('Recovery withheld: no successful problem notification was delivered'),
+			'Original problem alert suppressed (Monitoring snoozed)' => _('Monitoring Snooze'),
+			'No successful problem notification delivered' => _('Problem notification not delivered'),
 		];
 		if (isset($displayReasons[$error])) {
 			return $displayReasons[$error];

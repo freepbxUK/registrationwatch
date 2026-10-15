@@ -525,12 +525,11 @@ restart the timer.
 If the registration recovers before the delay expires, the problem notification
 is suppressed. When problem and recovery alerts are enabled, Alert History
 records both recipient-specific decisions: the problem as Suppressed with
-reason `Debounce Delay`, and the withheld recovery as Suppressed with explanation
-`Debounce Delay: recovery withheld because the problem notification was
-suppressed`. These entries are recorded when recovery makes the decisions
-final, not while the problem is still awaiting eligibility. Neither email is
-sent, no repeat or escalation state is started, and nothing from the short
-incident is released later.
+reason `Debounce Delay`, and the withheld recovery as Suppressed with the same
+reason `Debounce Delay`. These entries are recorded when recovery makes the
+decisions final, not while the problem is still awaiting eligibility. Neither
+email is sent, no repeat or escalation state is started, and nothing from the
+short incident is released later.
 
 A debounce value of `0` retains immediate alerting. A genuine recovery cancels
 the active repeat schedule. Recovery alerts require a successful problem
