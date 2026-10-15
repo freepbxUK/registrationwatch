@@ -39,6 +39,72 @@ class FreePBX {
 	}
 }
 
+class ContractAsteriskManagerStub {
+	public string $contactOutput = '';
+	public array $commands = [];
+
+	public function Command(string $command): string {
+		$this->commands[] = $command;
+		if ($command === 'pjsip show contacts') {
+			return trim($this->contactOutput) !== '' ? $this->contactOutput : "No objects found.\n";
+		}
+
+		return '';
+	}
+}
+
+if (!class_exists('CI_Email', false)) {
+	class CI_Email {
+		public static array $sendResults = [];
+		public static array $sentMessages = [];
+		private array $messageData = [];
+
+		public function from($address, $name = null, $returnPath = null): void {
+			$this->messageData['from'] = $address;
+		}
+
+		public function reply_to($address, $name = null): void {}
+		public function to($recipient): void {
+			$this->messageData['recipient'] = $recipient;
+		}
+		public function subject($subject): void {
+			$this->messageData['subject'] = $subject;
+		}
+		public function set_mailtype($type): void {}
+		public function message($message): void {
+			$this->messageData['message'] = $message;
+		}
+		public function send(): bool {
+			self::$sentMessages[] = $this->messageData;
+			return self::$sendResults ? (bool)array_shift(self::$sendResults) : true;
+		}
+		public function print_debugger($include = null): string {
+			return '';
+		}
+	}
+} else {
+	throw new RuntimeException('Contract tests must not run against a live FreePBX mailer.');
+}
+
+class ContractSQLitePDO extends PDO {
+	public function prepare($query, $options = null): PDOStatement {
+		$query = str_replace('INSERT IGNORE INTO', 'INSERT OR IGNORE INTO', $query);
+		if (strpos($query, 'ON DUPLICATE KEY UPDATE') !== false) {
+			if (!preg_match('/^\s*INSERT\s+INTO\s+registrationwatch_alert_escalation\b/i', $query)) {
+				throw new RuntimeException('Contract SQLite adapter only supports escalation upserts.');
+			}
+			$query = preg_replace('/\s+ON DUPLICATE KEY UPDATE\s+[\s\S]*$/i', '', $query) ?? $query;
+		}
+
+		$statement = parent::prepare($query, $options ?? []);
+		if ($statement === false) {
+			throw new RuntimeException('Unable to prepare contract SQLite statement.');
+		}
+
+		return $statement;
+	}
+}
+
 $database = new PDO('sqlite::memory:');
 $database->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
 $database->exec('CREATE TABLE registrationwatch_settings (setting_key TEXT PRIMARY KEY, setting_value TEXT NOT NULL, updated_at TEXT)');
@@ -52,6 +118,18 @@ assert_true($registrationWatchCss !== false, 'Registration Watch CSS should be r
 assert_true(strpos($registrationWatchCss, "body:has(.registrationwatch) #page_body {\n\tdisplay: block !important;\n\twidth: 100% !important;\n\tmax-width: 100% !important;\n}") !== false, 'Registration Watch CSS should include exact scoped FreePBX page body override');
 assert_true(strpos($registrationWatchCss, ".registrationwatch #rw-topology-container {\n\toverflow-x: auto;\n\toverflow-y: hidden;\n\t-webkit-overflow-scrolling: touch;\n}") !== false, 'Registration Watch CSS should include exact scoped topology scroll container override');
 assert_true(strpos($registrationWatchCss, ".registrationwatch .rw-map-row-view {\n\twidth: max-content;\n\tmin-width: 100%;\n\tmargin-bottom: 0;\n}") !== false, 'Registration Watch CSS should include exact scoped map row width override');
+assert_true(strpos($registrationWatchCss, ".registrationwatch #rw-map-view-toggle .btn:focus,\n.registrationwatch #rw-map-view-toggle .btn:active {\n\tbackground-color: #fff;") !== false, 'an unselected map view button must stay neutral when focused or pressed');
+assert_true(strpos($registrationWatchCss, ".registrationwatch #rw-map-view-toggle .btn.active:active {\n\tbackground-color: #5cb85c;") !== false, 'only the active map view button should be highlighted green');
+$registrationWatchView = file_get_contents(__DIR__ . '/../views/main.php');
+$registrationWatchJs = file_get_contents(__DIR__ . '/../assets/js/registrationwatch.js');
+assert_true($registrationWatchView !== false && strpos($registrationWatchView, 'data-sort-key="error"><?php echo _(\'Reason / Error\'); ?>') !== false && strpos($registrationWatchView, 'data-label="<?php echo _(\'Reason / Error\'); ?>"') !== false && strpos($registrationWatchView, '$displayAlertReason !== \'\' ? $displayAlertReason : \'-\'') !== false, 'initial Alert History rendering should use Reason / Error and retain a dash for an empty reason');
+assert_true($registrationWatchJs !== false && strpos($registrationWatchJs, 'data-label="Reason / Error"') !== false && strpos($registrationWatchJs, 'entry.display_error') !== false && strpos($registrationWatchJs, "value === null || value === undefined || value === '' ? '-' : String(value)") !== false, 'AJAX-rendered Alert History should use Reason / Error and retain a dash for an empty reason');
+assert_true(strpos($registrationWatchView, "mapLimitSelect.addEventListener('change'") !== false, 'Registration Status Map should re-render from a native change event on its Show limit');
+assert_true(strpos($registrationWatchJs, "mapLimit.dispatchEvent(new Event('change'))") !== false && strpos($registrationWatchJs, "$('#rw-map-limit').val(currentLimit).trigger('change')") === false, 'shared Show limit must dispatch a native change event so the map re-renders; jQuery trigger() does not reach native listeners');
+assert_true(strpos($registrationWatchView, 'let statusMapViewMode = <?php echo json_encode($uiMapViewMode); ?>;') !== false, 'map view mode should be restored from the persisted ui_map_view_mode setting');
+foreach (['card', 'row'] as $mapViewMode) {
+	assert_true(strpos($registrationWatchView, "statusMapViewMode = '" . $mapViewMode . "';\n\t\t\t\tif (window.rwSaveUiSetting) { window.rwSaveUiSetting('ui_map_view_mode', '" . $mapViewMode . "'); }\n\t\t\t\tapplyViewToggleState();\n\t\t\t\trenderRegistrationMap(latestMapRegistrations);") !== false, 'the ' . $mapViewMode . ' view button should switch mode, persist it, update the active button and re-render immediately');
+}
 
 function registration_key(string $extension, string $sourceIp, string $uaClass = ''): string {
 	$basis = strtolower(trim($extension)) . "\0" . strtolower(trim($sourceIp));
@@ -1594,8 +1672,25 @@ assert_true(normalise_repeat_mode('fibonacci') === 'escalating', 'stored fibonac
 assert_true(normalise_repeat_mode('garbage') === 'never', 'unknown repeat mode should fail safe to never');
 
 class TestableRegistrationwatch extends \FreePBX\modules\Registrationwatch {
+	public ?PDO $testDatabase = null;
+	public ContractAsteriskManagerStub $asteriskManager;
+
 	public function __construct() {
-		parent::__construct(new class {
+		$this->asteriskManager = new ContractAsteriskManagerStub();
+		$asteriskManager = $this->asteriskManager;
+		parent::__construct(new class($asteriskManager) {
+			public $Config;
+			public $astman;
+
+			public function __construct($astman) {
+				$this->astman = $astman;
+				$this->Config = new class {
+					public function get(string $key): string {
+						return $key === 'AMPUSERMANEMAILFROM' ? 'alerts@example.invalid' : '';
+					}
+				};
+			}
+
 			public function __call(string $name, array $args) {
 				return null;
 			}
@@ -1603,22 +1698,19 @@ class TestableRegistrationwatch extends \FreePBX\modules\Registrationwatch {
 	}
 
 	public function getAlertSettings(): array {
-		return ['alert_recipients' => 'admin@example.invalid'];
+		return [
+			'alert_recipients' => 'admin@example.invalid',
+			'ui_alert_history_sort_key' => 'time',
+			'ui_alert_history_sort_dir' => 'desc',
+		];
 	}
 
 	public function normaliseRecipients(string $recipients): array {
-		return $recipients === '' ? [] : [$recipients];
-	}
-
-	public function sendEmail(string $recipient, string $subject, string $message): array {
-		return ['status' => true, 'message' => 'sent'];
+		return array_values(array_filter(array_map('trim', explode(',', $recipients))));
 	}
 
 	public function insertAlertHistory(array $row): void {
 		return;
-	}
-	public function now(): string {
-		return '2026-06-15 10:00:00';
 	}
 }
 
@@ -1631,6 +1723,28 @@ $buildStorm = new ReflectionMethod($watch, 'buildStormSummaryEmail');
 $buildStorm->setAccessible(true);
 $getSystemIdentifier = new ReflectionMethod($watch, 'getSystemIdentifier');
 $getSystemIdentifier->setAccessible(true);
+$formatAlertHistoryReason = new ReflectionMethod($watch, 'formatAlertHistoryReasonForDisplay');
+$formatAlertHistoryReason->setAccessible(true);
+
+$alertHistoryReasonCases = [
+	[['alert_type' => 'not_registered', 'result' => 'suppressed', 'error' => 'Debounce Delay'], 'Debounce Delay'],
+	[['alert_type' => 'recovery', 'result' => 'suppressed', 'error' => 'Original problem alert suppressed (Debounce Delay)'], 'Debounce Delay'],
+	[['alert_type' => 'unreachable', 'result' => 'suppressed', 'error' => 'Monitoring snoozed'], 'Monitoring Snooze'],
+	[['alert_type' => 'recovery', 'result' => 'suppressed', 'error' => 'Original problem alert suppressed (Monitoring snoozed)'], 'Monitoring Snooze'],
+	[['alert_type' => 'recovery', 'result' => 'suppressed', 'error' => 'No successful problem notification delivered'], 'Problem notification not delivered'],
+	[['alert_type' => 'storm_summary', 'result' => 'failed', 'error' => 'CI_Email send failed.'], 'Storm Summary delivery failed: CI_Email send failed.'],
+	[['alert_type' => 'unreachable', 'result' => 'storm_summary_failed', 'error' => 'CI_Email send failed.'], 'Storm Summary delivery failed: CI_Email send failed.'],
+	[['alert_type' => 'recovery', 'result' => 'suppressed', 'error' => 'Storm Summary delivery failed: CI_Email send failed.'], 'Storm Summary delivery failed: CI_Email send failed.'],
+	[['alert_type' => 'unreachable', 'result' => 'storm_suppressed', 'error' => ''], 'Covered by Storm Summary'],
+	[['result' => 'sent', 'error' => ''], ''],
+	[['result' => 'failed', 'error' => 'CI_Email send failed.'], 'CI_Email send failed.'],
+	[['result' => 'suppressed', 'error' => 'Unrecognised historical reason'], 'Unrecognised historical reason'],
+];
+foreach ($alertHistoryReasonCases as $index => [$entry, $expectedReason]) {
+	$storedError = $entry['error'];
+	assert_true($formatAlertHistoryReason->invoke($watch, $entry) === $expectedReason, 'Alert History reason presentation mapping should match case ' . $index);
+	assert_true($entry['error'] === $storedError, 'Alert History reason presentation must not mutate the stored error value for case ' . $index);
+}
 
 $normalMessage = $buildAlert->invoke($watch, ['extension' => '2001', 'to_state' => 'Unreachable', 'reason' => 'threshold', 'created_at' => '2026-06-15 10:00:00'], 'unreachable');
 assert_true($getSystemIdentifier->invoke($watch) === 'MY-PBX-NAME', 'Registration Watch should retrieve the configured FreePBX System Identifier from FreePBX::Config()');
@@ -1677,5 +1791,1007 @@ assert_true(strpos($normalBodyAfterFirstLine, 'Extension: 2001') === 0, 'normal 
 assert_true($normalBodyAfterFirstLine === $expectedNormalBodyAfterFirstLine, 'normal email body should preserve all existing content after the first line and blank line');
 assert_true(strpos($stormMessage['message'], 'Registration Watch Storm Summary from MY-PBX-NAME') === 0, 'storm summary should include the configured system identifier');
 assert_true(strpos($manualTestLine, 'Registration Watch test email from MY-PBX-NAME') === 0, 'manual test email should include the configured system identifier');
+
+$makeQueueFixture = function (int $debounceSeconds, int $stormThreshold = 20, string $snoozedUntil = '', string $alertRecipients = 'admin@example.invalid'): array {
+	$database = new ContractSQLitePDO('sqlite::memory:');
+	$database->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+	$database->sqliteCreateFunction('DATABASE', static function (): string {
+		return 'registrationwatch_contract';
+	}, 0);
+	$database->exec("ATTACH DATABASE ':memory:' AS information_schema");
+	$database->exec('CREATE TABLE information_schema.TABLES (TABLE_SCHEMA TEXT, TABLE_NAME TEXT)');
+	$database->exec("INSERT INTO information_schema.TABLES (TABLE_SCHEMA, TABLE_NAME) VALUES ('registrationwatch_contract', 'registrationwatch_registrations'), ('registrationwatch_contract', 'devices')");
+	CI_Email::$sendResults = [];
+	CI_Email::$sentMessages = [];
+	$database->exec('CREATE TABLE registrationwatch_settings (setting_key TEXT PRIMARY KEY, setting_value TEXT, updated_at TEXT)');
+	$database->exec('CREATE TABLE devices (id TEXT NOT NULL, tech TEXT NOT NULL)');
+	$database->exec(
+		'CREATE TABLE registrationwatch_registrations (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			registration_key TEXT NOT NULL UNIQUE,
+			extension TEXT NOT NULL,
+			description TEXT,
+			last_known_status TEXT NOT NULL,
+			contact_uri TEXT,
+			source_ip TEXT,
+			source_port INTEGER,
+			user_agent TEXT,
+			device_name TEXT,
+			firmware_version TEXT,
+			contact_expires_at TEXT,
+			qualify_frequency TEXT,
+			last_checked_at TEXT,
+			latency_ms REAL,
+			enabled INTEGER NOT NULL,
+			repeat_mode TEXT
+		)'
+	);
+	$database->exec(
+		'CREATE TABLE registrationwatch_status_history (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			registration_id INTEGER NOT NULL,
+			registration_key TEXT NOT NULL,
+			extension TEXT NOT NULL,
+			from_state TEXT,
+			to_state TEXT NOT NULL,
+			source TEXT NOT NULL,
+			reason TEXT,
+			contact_uri TEXT,
+			latency_ms REAL,
+			created_at TEXT NOT NULL
+		)'
+	);
+	$database->exec(
+		'CREATE TABLE registrationwatch_alert_history (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			registration_id INTEGER,
+			registration_key TEXT,
+			extension TEXT NOT NULL,
+			contact_uri TEXT,
+			history_id INTEGER,
+			reminder_n INTEGER NOT NULL DEFAULT 0,
+			alert_type TEXT NOT NULL,
+			status TEXT NOT NULL,
+			recipient TEXT NOT NULL,
+			subject TEXT NOT NULL,
+			message TEXT,
+			sent_at TEXT NOT NULL,
+			result TEXT NOT NULL,
+			error TEXT,
+			UNIQUE (history_id, alert_type, recipient, reminder_n)
+		)'
+	);
+	$database->exec(
+		'CREATE TABLE registrationwatch_alert_escalation (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			registration_id INTEGER NOT NULL,
+			registration_key TEXT NOT NULL,
+			extension TEXT NOT NULL,
+			history_id INTEGER NOT NULL,
+			alert_type TEXT NOT NULL,
+			active_since TEXT NOT NULL,
+			last_alert_at TEXT,
+			alert_count INTEGER NOT NULL DEFAULT 0,
+			next_due_at TEXT NOT NULL,
+			repeat_mode TEXT NOT NULL,
+			created_at TEXT,
+			updated_at TEXT,
+			UNIQUE (registration_id, alert_type)
+		)'
+	);
+	$database->exec(
+		'CREATE TRIGGER registrationwatch_alert_escalation_upsert
+		BEFORE INSERT ON registrationwatch_alert_escalation
+		WHEN EXISTS (
+			SELECT 1 FROM registrationwatch_alert_escalation
+			WHERE registration_id = NEW.registration_id AND alert_type = NEW.alert_type
+		)
+		BEGIN
+			UPDATE registrationwatch_alert_escalation
+			SET registration_key = NEW.registration_key,
+				extension = NEW.extension,
+				history_id = NEW.history_id,
+				active_since = NEW.active_since,
+				last_alert_at = NEW.last_alert_at,
+				alert_count = NEW.alert_count,
+				next_due_at = NEW.next_due_at,
+				repeat_mode = NEW.repeat_mode,
+				updated_at = NEW.updated_at
+			WHERE registration_id = NEW.registration_id AND alert_type = NEW.alert_type;
+			SELECT RAISE(IGNORE);
+		END'
+	);
+	$settings = [
+		'alert_enabled' => '1',
+		'alert_recipients' => $alertRecipients,
+		'alert_on_unreachable' => '1',
+		'alert_on_not_registered' => '1',
+		'alert_on_recovery' => '1',
+		'debounce_seconds' => (string)$debounceSeconds,
+		'repeat_mode' => 'never',
+		'storm_threshold' => (string)$stormThreshold,
+		'monitoring_snoozed_until' => $snoozedUntil,
+	];
+	$settingInsert = $database->prepare('INSERT INTO registrationwatch_settings (setting_key, setting_value) VALUES (?, ?)');
+	foreach ($settings as $key => $value) {
+		$settingInsert->execute([$key, $value]);
+	}
+
+	FreePBX::$database = $database;
+	FreePBX::$config = new FreePBXSystemIdentifierConfigStub(['FREEPBX_SYSTEM_IDENT' => 'TEST-PBX']);
+	$watch = new TestableRegistrationwatch();
+	$watch->testDatabase = $database;
+	$processQueue = new ReflectionMethod($watch, 'processAlertQueue');
+	$processQueue->setAccessible(true);
+	return [$database, $watch, $processQueue];
+};
+
+[$presentationDb, $presentationWatch] = $makeQueueFixture(0);
+$presentationStorageCases = [
+	['history-debounce-problem', 'not_registered', 'suppressed', 'Debounce Delay', 'Debounce Delay'],
+	['history-debounce-recovery', 'recovery', 'suppressed', 'Original problem alert suppressed (Debounce Delay)', 'Debounce Delay'],
+	['history-snooze-problem', 'unreachable', 'suppressed', 'Monitoring snoozed', 'Monitoring Snooze'],
+	['history-snooze-recovery', 'recovery', 'suppressed', 'Original problem alert suppressed (Monitoring snoozed)', 'Monitoring Snooze'],
+	['history-no-problem-delivery', 'recovery', 'suppressed', 'No successful problem notification delivered', 'Problem notification not delivered'],
+	['storm-summary-failed', 'storm_summary', 'failed', 'CI_Email send failed.', 'Storm Summary delivery failed: CI_Email send failed.'],
+	['storm-individual-failed', 'unreachable', 'storm_summary_failed', 'CI_Email send failed.', 'Storm Summary delivery failed: CI_Email send failed.'],
+	['storm-recovery-failed', 'recovery', 'suppressed', 'Storm Summary delivery failed: CI_Email send failed.', 'Storm Summary delivery failed: CI_Email send failed.'],
+	['storm-summary-covered', 'unreachable', 'storm_suppressed', '', 'Covered by Storm Summary'],
+];
+$insertPresentationEntry = $presentationDb->prepare('INSERT INTO registrationwatch_alert_history (extension, alert_type, status, recipient, subject, sent_at, result, error) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
+foreach ($presentationStorageCases as $case) {
+	$insertPresentationEntry->execute([$case[0], $case[1], 'Unreachable', 'admin@example.invalid', 'Alert', '2026-06-15 10:00:00', $case[2], $case[3]]);
+}
+$getAlertHistory = new ReflectionMethod($presentationWatch, 'getAlertHistory');
+$getAlertHistory->setAccessible(true);
+$presentedHistory = $getAlertHistory->invoke($presentationWatch);
+$presentedByExtension = [];
+foreach ($presentedHistory['rows'] as $entry) {
+	$presentedByExtension[$entry['extension']] = $entry;
+}
+$storedErrorsAfterPresentation = $presentationDb->query('SELECT extension, error FROM registrationwatch_alert_history')->fetchAll(PDO::FETCH_KEY_PAIR);
+foreach ($presentationStorageCases as $case) {
+	$entry = $presentedByExtension[$case[0]] ?? [];
+	assert_true(($entry['display_error'] ?? null) === $case[4], 'Alert History retrieval should expose the mapped reason for ' . $case[0]);
+	assert_true(($entry['error'] ?? null) === $case[3] && ($storedErrorsAfterPresentation[$case[0]] ?? null) === $case[3], 'Alert History presentation must preserve the original database error for ' . $case[0]);
+}
+
+[$upsertDb] = $makeQueueFixture(0);
+$upsertSql = $upsertDb->prepare(
+	'INSERT INTO registrationwatch_alert_escalation
+		(registration_id, registration_key, extension, history_id, alert_type, active_since, last_alert_at, alert_count, next_due_at, repeat_mode, created_at, updated_at)
+	VALUES
+		(:registration_id, :registration_key, :extension, :history_id, :alert_type, :active_since, :last_alert_at, :alert_count, :next_due_at, :repeat_mode, :created_at, :updated_at)
+	ON DUPLICATE KEY UPDATE
+		registration_key = VALUES(registration_key),
+		extension = VALUES(extension),
+		history_id = VALUES(history_id),
+		active_since = VALUES(active_since),
+		last_alert_at = VALUES(last_alert_at),
+		alert_count = VALUES(alert_count),
+		next_due_at = VALUES(next_due_at),
+		repeat_mode = VALUES(repeat_mode),
+		updated_at = VALUES(updated_at)'
+);
+$upsertValues = [
+	':registration_id' => 1,
+	':registration_key' => 'old-registration-key',
+	':extension' => 'upsert-contract',
+	':history_id' => 10,
+	':alert_type' => 'unreachable',
+	':active_since' => '2026-06-15 10:00:00',
+	':last_alert_at' => '2026-06-15 10:00:00',
+	':alert_count' => 0,
+	':next_due_at' => '2026-06-15 10:05:00',
+	':repeat_mode' => '5m',
+	':created_at' => '2026-06-15 10:00:00',
+	':updated_at' => '2026-06-15 10:00:00',
+];
+$upsertSql->execute($upsertValues);
+$originalUpsertId = (int)$upsertDb->lastInsertId();
+$upsertValues[':registration_key'] = 'new-registration-key';
+$upsertValues[':extension'] = 'updated-upsert-contract';
+$upsertValues[':history_id'] = 11;
+$upsertValues[':active_since'] = '2026-06-15 10:01:00';
+$upsertValues[':last_alert_at'] = '2026-06-15 10:02:00';
+$upsertValues[':alert_count'] = 2;
+$upsertValues[':next_due_at'] = '2026-06-15 11:02:00';
+$upsertValues[':repeat_mode'] = 'hourly';
+$upsertValues[':created_at'] = '2026-06-15 10:01:00';
+$upsertValues[':updated_at'] = '2026-06-15 10:02:00';
+$upsertSql->execute($upsertValues);
+$updatedUpsert = $upsertDb->query('SELECT * FROM registrationwatch_alert_escalation')->fetch(PDO::FETCH_ASSOC);
+assert_true(is_array($updatedUpsert) && (int)$updatedUpsert['id'] === $originalUpsertId, 'MariaDB-style escalation upsert must preserve the existing row ID');
+assert_true($updatedUpsert['registration_key'] === 'new-registration-key' && $updatedUpsert['extension'] === 'updated-upsert-contract' && (int)$updatedUpsert['history_id'] === 11 && $updatedUpsert['active_since'] === '2026-06-15 10:01:00' && $updatedUpsert['last_alert_at'] === '2026-06-15 10:02:00' && (int)$updatedUpsert['alert_count'] === 2 && $updatedUpsert['next_due_at'] === '2026-06-15 11:02:00' && $updatedUpsert['repeat_mode'] === 'hourly' && $updatedUpsert['updated_at'] === '2026-06-15 10:02:00', 'MariaDB-style escalation upsert must update every assigned field');
+assert_true($updatedUpsert['created_at'] === '2026-06-15 10:00:00', 'MariaDB-style escalation upsert must preserve fields not assigned by its update clause');
+assert_true((int)$upsertDb->query('SELECT COUNT(*) FROM registrationwatch_alert_escalation')->fetchColumn() === 1, 'MariaDB-style escalation upsert must leave exactly one record');
+$upsertValues[':registration_id'] = 2;
+$upsertValues[':extension'] = null;
+$invalidInsertRejected = false;
+try {
+	$upsertSql->execute($upsertValues);
+} catch (PDOException $e) {
+	$invalidInsertRejected = true;
+}
+assert_true($invalidInsertRejected, 'invalid escalation insert must raise a database error instead of being ignored');
+
+	$insertQueueRegistration = function (PDO $database, string $extension, string $status = 'Reachable', string $repeatMode = 'never', ?string $sourceIp = null): array {
+	$key = $sourceIp !== null ? registration_key($extension, $sourceIp) : hash('sha256', $extension . '\0queue-test');
+	$stmt = $database->prepare('INSERT INTO registrationwatch_registrations (registration_key, extension, last_known_status, source_ip, enabled, repeat_mode) VALUES (?, ?, ?, ?, 1, ?)');
+	$stmt->execute([$key, $extension, $status, $sourceIp, $repeatMode]);
+	if ($sourceIp !== null) {
+		$database->prepare('INSERT INTO devices (id, tech) VALUES (?, ?)')->execute([$extension, 'pjsip']);
+	}
+	return [(int)$database->lastInsertId(), $key];
+};
+$insertQueueTransition = function (PDO $database, int $registrationId, string $key, string $extension, string $from, string $to, string $createdAt): int {
+	$stmt = $database->prepare('INSERT INTO registrationwatch_status_history (registration_id, registration_key, extension, from_state, to_state, source, reason, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
+	$stmt->execute([$registrationId, $key, $extension, $from, $to, 'reconcile', 'status_change', $createdAt]);
+	return (int)$database->lastInsertId();
+};
+$runQueue = function (ReflectionMethod $processQueue, object $watch, string $now): void {
+	if ($watch instanceof TestableRegistrationwatch && $watch->testDatabase instanceof PDO) {
+		FreePBX::$database = $watch->testDatabase;
+	}
+	$processQueue->invoke($watch, $now);
+};
+$runQueueAndCountEmails = function (ReflectionMethod $processQueue, object $watch, string $now) use ($runQueue): int {
+	$emailsBefore = count(CI_Email::$sentMessages);
+	$runQueue($processQueue, $watch, $now);
+	return count(CI_Email::$sentMessages) - $emailsBefore;
+};
+$setQueueLiveStatus = function (TestableRegistrationwatch $watch, string $extension, string $sourceIp, string $status): void {
+	$statusToken = $status === 'Not registered' ? 'Removed' : $status;
+	$watch->asteriskManager->contactOutput = sprintf(
+		'Contact: %s/sip:%s@%s:5060 %s 0.000',
+		$extension,
+		$extension,
+		$sourceIp,
+		$statusToken
+	);
+};
+
+[$flapDb, $flapWatch, $flapQueue] = $makeQueueFixture(300);
+[$flapId, $flapKey] = $insertQueueRegistration($flapDb, 'debounce-flap');
+$flapProblemId = $insertQueueTransition($flapDb, $flapId, $flapKey, 'debounce-flap', 'Reachable', 'Unreachable', '2026-06-15 08:12:07');
+$flapRecoveryId = $insertQueueTransition($flapDb, $flapId, $flapKey, 'debounce-flap', 'Unreachable', 'Reachable', '2026-06-15 08:12:22');
+$flapEmailDelta = $runQueueAndCountEmails($flapQueue, $flapWatch, '2026-06-15 08:17:30');
+$flapEmailDelta += $runQueueAndCountEmails($flapQueue, $flapWatch, '2026-06-15 08:22:30');
+assert_true((int)$flapDb->query("SELECT COUNT(*) FROM registrationwatch_status_history WHERE registration_id = {$flapId}")->fetchColumn() === 2, 'debounced flap should retain both observed Status History transitions');
+$flapProblemDecision = $flapDb->query("SELECT registration_id, history_id, alert_type, recipient, result, error FROM registrationwatch_alert_history WHERE alert_type = 'unreachable'")->fetch(PDO::FETCH_ASSOC);
+$flapRecoveryDecision = $flapDb->query("SELECT registration_id, history_id, alert_type, recipient, result, error FROM registrationwatch_alert_history WHERE alert_type = 'recovery'")->fetch(PDO::FETCH_ASSOC);
+assert_true((int)$flapDb->query('SELECT COUNT(*) FROM registrationwatch_alert_history')->fetchColumn() === 2, 'short recovered flap should record both suppressed problem and recovery decisions');
+assert_true(is_array($flapProblemDecision) && (int)$flapProblemDecision['registration_id'] === $flapId && (int)$flapProblemDecision['history_id'] === $flapProblemId && $flapProblemDecision['recipient'] === 'admin@example.invalid' && $flapProblemDecision['result'] === 'suppressed' && $flapProblemDecision['error'] === 'Debounce Delay', 'debounce suppression should retain its reason and reference the problem transition');
+assert_true(is_array($flapRecoveryDecision) && (int)$flapRecoveryDecision['registration_id'] === $flapId && (int)$flapRecoveryDecision['history_id'] === $flapRecoveryId && $flapRecoveryDecision['recipient'] === 'admin@example.invalid' && $flapRecoveryDecision['result'] === 'suppressed' && $flapRecoveryDecision['error'] === 'Original problem alert suppressed (Debounce Delay)', 'withheld recovery should record its reason against the recovery transition');
+assert_true((int)$flapDb->query('SELECT COUNT(*) FROM registrationwatch_alert_escalation')->fetchColumn() === 0, 'short recovered flap should create no repeat escalation state');
+assert_true($flapEmailDelta === 0 && (int)$flapDb->query("SELECT COUNT(*) FROM registrationwatch_alert_history WHERE alert_type = 'recovery'")->fetchColumn() === 1, 'short recovered flap should send no email or create duplicate recovery decisions on replay');
+
+[$notRegisteredFlapDb, $notRegisteredFlapWatch, $notRegisteredFlapQueue] = $makeQueueFixture(300);
+[$notRegisteredFlapId, $notRegisteredFlapKey] = $insertQueueRegistration($notRegisteredFlapDb, 'debounce-not-registered-flap');
+$notRegisteredProblemId = $insertQueueTransition($notRegisteredFlapDb, $notRegisteredFlapId, $notRegisteredFlapKey, 'debounce-not-registered-flap', 'Reachable', 'Not registered', '2026-06-15 08:25:00');
+$notRegisteredRecoveryId = $insertQueueTransition($notRegisteredFlapDb, $notRegisteredFlapId, $notRegisteredFlapKey, 'debounce-not-registered-flap', 'Not registered', 'Reachable', '2026-06-15 08:25:15');
+$notRegisteredFlapEmails = $runQueueAndCountEmails($notRegisteredFlapQueue, $notRegisteredFlapWatch, '2026-06-15 08:30:00');
+$notRegisteredFlapRows = $notRegisteredFlapDb->query('SELECT registration_id, history_id, alert_type, recipient, result, error FROM registrationwatch_alert_history ORDER BY id')->fetchAll(PDO::FETCH_ASSOC);
+assert_true(count($notRegisteredFlapRows) === 2 && $notRegisteredFlapRows[0]['alert_type'] === 'not_registered' && (int)$notRegisteredFlapRows[0]['history_id'] === $notRegisteredProblemId && $notRegisteredFlapRows[0]['result'] === 'suppressed' && $notRegisteredFlapRows[0]['error'] === 'Debounce Delay', 'short Not registered outage should retain its debounce problem suppression');
+assert_true($notRegisteredFlapRows[1]['alert_type'] === 'recovery' && (int)$notRegisteredFlapRows[1]['registration_id'] === $notRegisteredFlapId && (int)$notRegisteredFlapRows[1]['history_id'] === $notRegisteredRecoveryId && $notRegisteredFlapRows[1]['recipient'] === 'admin@example.invalid' && $notRegisteredFlapRows[1]['result'] === 'suppressed' && $notRegisteredFlapRows[1]['error'] === 'Original problem alert suppressed (Debounce Delay)', 'short Not registered recovery should reference and explain the withheld recovery decision');
+assert_true($notRegisteredFlapEmails === 0, 'short Not registered outage should send neither problem nor recovery email');
+
+[$zeroHandoffDb, $zeroHandoffWatch, $zeroHandoffQueue] = $makeQueueFixture(0);
+[$zeroHandoffId, $zeroHandoffKey] = $insertQueueRegistration($zeroHandoffDb, 'debounce-zero-handoff');
+$insertQueueTransition($zeroHandoffDb, $zeroHandoffId, $zeroHandoffKey, 'debounce-zero-handoff', 'Reachable', 'Unreachable', '2026-06-15 08:20:00');
+$insertQueueTransition($zeroHandoffDb, $zeroHandoffId, $zeroHandoffKey, 'debounce-zero-handoff', 'Unreachable', 'Not registered', '2026-06-15 08:20:01');
+$zeroHandoffEmailDelta = $runQueueAndCountEmails($zeroHandoffQueue, $zeroHandoffWatch, '2026-06-15 08:20:01');
+$zeroHandoffTypes = $zeroHandoffDb->query("SELECT alert_type FROM registrationwatch_alert_history WHERE reminder_n = 0 ORDER BY history_id")->fetchAll(PDO::FETCH_COLUMN);
+assert_true($zeroHandoffTypes === ['unreachable', 'not_registered'], 'zero debounce should send one alert for each distinct alertable unhealthy state transition');
+assert_true($zeroHandoffEmailDelta === 2, 'zero-debounce Unreachable to Not registered handoff should send exactly two problem emails');
+
+[$transientHandoffDb, $transientHandoffWatch, $transientHandoffQueue] = $makeQueueFixture(300);
+[$transientHandoffId, $transientHandoffKey] = $insertQueueRegistration($transientHandoffDb, 'debounce-transient-handoff');
+$insertQueueTransition($transientHandoffDb, $transientHandoffId, $transientHandoffKey, 'debounce-transient-handoff', 'Reachable', 'Unreachable', '2026-06-15 08:30:00');
+$insertQueueTransition($transientHandoffDb, $transientHandoffId, $transientHandoffKey, 'debounce-transient-handoff', 'Unreachable', 'Not registered', '2026-06-15 08:31:00');
+$transientRecoveryId = $insertQueueTransition($transientHandoffDb, $transientHandoffId, $transientHandoffKey, 'debounce-transient-handoff', 'Not registered', 'Reachable', '2026-06-15 08:34:15');
+$transientHandoffEmailDelta = $runQueueAndCountEmails($transientHandoffQueue, $transientHandoffWatch, '2026-06-15 08:34:15');
+$transientHandoffEmailDelta += $runQueueAndCountEmails($transientHandoffQueue, $transientHandoffWatch, '2026-06-15 08:36:00');
+$transientProblemDecision = $transientHandoffDb->query("SELECT history_id, alert_type, result, error FROM registrationwatch_alert_history WHERE alert_type = 'not_registered'")->fetch(PDO::FETCH_ASSOC);
+$transientRecoveryDecision = $transientHandoffDb->query("SELECT history_id, alert_type, result, error FROM registrationwatch_alert_history WHERE alert_type = 'recovery'")->fetch(PDO::FETCH_ASSOC);
+assert_true((int)$transientHandoffDb->query("SELECT COUNT(*) FROM registrationwatch_status_history WHERE registration_id = {$transientHandoffId}")->fetchColumn() === 3, 'transient unhealthy handoff should retain every factual transition');
+assert_true((int)$transientHandoffDb->query('SELECT COUNT(*) FROM registrationwatch_alert_history')->fetchColumn() === 2, 'transient unhealthy handoff should audit both suppressed notification decisions');
+assert_true(is_array($transientProblemDecision) && (int)$transientProblemDecision['history_id'] === 2 && $transientProblemDecision['alert_type'] === 'not_registered' && $transientProblemDecision['result'] === 'suppressed' && $transientProblemDecision['error'] === 'Debounce Delay', 'transient unhealthy handoff should record the latest problem suppression reason');
+assert_true(is_array($transientRecoveryDecision) && (int)$transientRecoveryDecision['history_id'] === $transientRecoveryId && $transientRecoveryDecision['alert_type'] === 'recovery' && $transientRecoveryDecision['result'] === 'suppressed' && $transientRecoveryDecision['error'] === 'Original problem alert suppressed (Debounce Delay)', 'transient unhealthy handoff should audit recovery against its own transition');
+assert_true((int)$transientHandoffDb->query('SELECT COUNT(*) FROM registrationwatch_alert_escalation')->fetchColumn() === 0, 'transient unhealthy handoff should not start escalation state');
+assert_true($transientHandoffEmailDelta === 0, 'transient unhealthy handoff should send neither problem nor recovery email');
+
+[$persistentDb, $persistentWatch, $persistentQueue] = $makeQueueFixture(300);
+[$persistentId, $persistentKey] = $insertQueueRegistration($persistentDb, 'debounce-persistent');
+$insertQueueTransition($persistentDb, $persistentId, $persistentKey, 'debounce-persistent', 'Reachable', 'Unreachable', '2026-06-15 09:00:00');
+$runQueue($persistentQueue, $persistentWatch, '2026-06-15 09:04:59');
+assert_true((int)$persistentDb->query('SELECT COUNT(*) FROM registrationwatch_alert_history')->fetchColumn() === 0, 'persistent fault must remain pending just before debounce expires');
+$persistentInitialEmailDelta = $runQueueAndCountEmails($persistentQueue, $persistentWatch, '2026-06-15 09:05:00');
+$persistentInitialEmailDelta += $runQueueAndCountEmails($persistentQueue, $persistentWatch, '2026-06-15 09:05:20');
+assert_true((int)$persistentDb->query("SELECT COUNT(*) FROM registrationwatch_alert_history WHERE alert_type = 'unreachable' AND reminder_n = 0")->fetchColumn() === 1, 'persistent fault should reserve exactly one initial alert after debounce');
+assert_true($persistentInitialEmailDelta === 1, 'persistent fault should send exactly one initial email for this incident');
+
+[$handoffDb, $handoffWatch, $handoffQueue] = $makeQueueFixture(300);
+[$handoffId, $handoffKey] = $insertQueueRegistration($handoffDb, 'debounce-handoff', 'Not registered');
+$insertQueueTransition($handoffDb, $handoffId, $handoffKey, 'debounce-handoff', 'Reachable', 'Unreachable', '2026-06-15 09:00:00');
+$handoffTransitionId = $insertQueueTransition($handoffDb, $handoffId, $handoffKey, 'debounce-handoff', 'Unreachable', 'Not registered', '2026-06-15 09:03:00');
+$handoffEarlyEmailDelta = $runQueueAndCountEmails($handoffQueue, $handoffWatch, '2026-06-15 09:04:59');
+assert_true((int)$handoffDb->query('SELECT COUNT(*) FROM registrationwatch_alert_history')->fetchColumn() === 0, 'unhealthy-state handoff must not restart the debounce timer');
+assert_true($handoffEarlyEmailDelta === 0, 'unhealthy-state handoff must not alert before the continuous debounce expires');
+$handoffQualifiedEmailDelta = $runQueueAndCountEmails($handoffQueue, $handoffWatch, '2026-06-15 09:05:00');
+$handoffAlert = $handoffDb->query('SELECT history_id, alert_type FROM registrationwatch_alert_history WHERE reminder_n = 0')->fetch(PDO::FETCH_ASSOC);
+assert_true(is_array($handoffAlert) && (int)$handoffAlert['history_id'] === $handoffTransitionId && $handoffAlert['alert_type'] === 'not_registered', 'continuous unhealthy handoff should alert once using the latest eligible problem state');
+assert_true((int)$handoffDb->query('SELECT COUNT(*) FROM registrationwatch_alert_history WHERE reminder_n = 0')->fetchColumn() === 1 && $handoffQualifiedEmailDelta === 1, 'debounced unhealthy handoff should emit only the current qualifying problem alert');
+
+[$lateZeroHandoffDb, $lateZeroHandoffWatch, $lateZeroHandoffQueue] = $makeQueueFixture(0);
+[$lateZeroHandoffId, $lateZeroHandoffKey] = $insertQueueRegistration($lateZeroHandoffDb, 'debounce-late-zero-handoff');
+$insertQueueTransition($lateZeroHandoffDb, $lateZeroHandoffId, $lateZeroHandoffKey, 'debounce-late-zero-handoff', 'Reachable', 'Unreachable', '2026-06-15 09:00:00');
+$lateZeroInitialDelta = $runQueueAndCountEmails($lateZeroHandoffQueue, $lateZeroHandoffWatch, '2026-06-15 09:00:00');
+$insertQueueTransition($lateZeroHandoffDb, $lateZeroHandoffId, $lateZeroHandoffKey, 'debounce-late-zero-handoff', 'Unreachable', 'Not registered', '2026-06-15 09:10:00');
+$lateZeroSecondDelta = $runQueueAndCountEmails($lateZeroHandoffQueue, $lateZeroHandoffWatch, '2026-06-15 09:10:00');
+$lateZeroTypes = $lateZeroHandoffDb->query("SELECT alert_type FROM registrationwatch_alert_history WHERE reminder_n = 0 ORDER BY history_id")->fetchAll(PDO::FETCH_COLUMN);
+assert_true($lateZeroInitialDelta === 1 && $lateZeroSecondDelta === 1 && $lateZeroTypes === ['unreachable', 'not_registered'], 'fresh Not registered transition should alert after the original incident start becomes stale with zero debounce');
+
+[$staleAnchorZeroDb, $staleAnchorZeroWatch, $staleAnchorZeroQueue] = $makeQueueFixture(0);
+[$staleAnchorZeroId, $staleAnchorZeroKey] = $insertQueueRegistration($staleAnchorZeroDb, 'debounce-stale-anchor-zero');
+$staleAnchorZeroProblemId = $insertQueueTransition($staleAnchorZeroDb, $staleAnchorZeroId, $staleAnchorZeroKey, 'debounce-stale-anchor-zero', 'Reachable', 'Unreachable', '2026-06-15 09:00:00');
+$staleAnchorZeroFreshId = $insertQueueTransition($staleAnchorZeroDb, $staleAnchorZeroId, $staleAnchorZeroKey, 'debounce-stale-anchor-zero', 'Unreachable', 'Not registered', '2026-06-15 09:10:00');
+$staleAnchorZeroEmailDelta = $runQueueAndCountEmails($staleAnchorZeroQueue, $staleAnchorZeroWatch, '2026-06-15 09:10:00');
+$staleAnchorZeroRows = $staleAnchorZeroDb->query('SELECT history_id, alert_type FROM registrationwatch_alert_history WHERE reminder_n = 0')->fetchAll(PDO::FETCH_ASSOC);
+assert_true((int)$staleAnchorZeroDb->query('SELECT COUNT(*) FROM registrationwatch_alert_history WHERE history_id = ' . $staleAnchorZeroProblemId)->fetchColumn() === 0, 'pre-window Unreachable anchor must not create a new Alert History action');
+assert_true(count($staleAnchorZeroRows) === 1 && (int)$staleAnchorZeroRows[0]['history_id'] === $staleAnchorZeroFreshId && $staleAnchorZeroRows[0]['alert_type'] === 'not_registered' && $staleAnchorZeroEmailDelta === 1, 'zero debounce should deliver only the fresh Not registered transition');
+
+[$lateDebouncedHandoffDb, $lateDebouncedHandoffWatch, $lateDebouncedHandoffQueue] = $makeQueueFixture(300);
+[$lateDebouncedHandoffId, $lateDebouncedHandoffKey] = $insertQueueRegistration($lateDebouncedHandoffDb, 'debounce-late-state-change');
+$insertQueueTransition($lateDebouncedHandoffDb, $lateDebouncedHandoffId, $lateDebouncedHandoffKey, 'debounce-late-state-change', 'Reachable', 'Unreachable', '2026-06-15 09:00:00');
+$lateDebouncedInitialDelta = $runQueueAndCountEmails($lateDebouncedHandoffQueue, $lateDebouncedHandoffWatch, '2026-06-15 09:05:00');
+$insertQueueTransition($lateDebouncedHandoffDb, $lateDebouncedHandoffId, $lateDebouncedHandoffKey, 'debounce-late-state-change', 'Unreachable', 'Not registered', '2026-06-15 09:20:00');
+$lateDebouncedSecondDelta = $runQueueAndCountEmails($lateDebouncedHandoffQueue, $lateDebouncedHandoffWatch, '2026-06-15 09:20:00');
+$lateDebouncedTypes = $lateDebouncedHandoffDb->query("SELECT alert_type FROM registrationwatch_alert_history WHERE reminder_n = 0 ORDER BY history_id")->fetchAll(PDO::FETCH_COLUMN);
+assert_true($lateDebouncedInitialDelta === 1 && $lateDebouncedSecondDelta === 1 && $lateDebouncedTypes === ['unreachable', 'not_registered'], 'fresh Not registered transition should alert immediately after an already-matured continuous incident');
+
+[$staleAnchorDebouncedDb, $staleAnchorDebouncedWatch, $staleAnchorDebouncedQueue] = $makeQueueFixture(300);
+[$staleAnchorDebouncedId, $staleAnchorDebouncedKey] = $insertQueueRegistration($staleAnchorDebouncedDb, 'debounce-stale-anchor-matured');
+$staleAnchorDebouncedProblemId = $insertQueueTransition($staleAnchorDebouncedDb, $staleAnchorDebouncedId, $staleAnchorDebouncedKey, 'debounce-stale-anchor-matured', 'Reachable', 'Unreachable', '2026-06-15 09:00:00');
+$staleAnchorDebouncedFreshId = $insertQueueTransition($staleAnchorDebouncedDb, $staleAnchorDebouncedId, $staleAnchorDebouncedKey, 'debounce-stale-anchor-matured', 'Unreachable', 'Not registered', '2026-06-15 09:20:00');
+$staleAnchorDebouncedEmailDelta = $runQueueAndCountEmails($staleAnchorDebouncedQueue, $staleAnchorDebouncedWatch, '2026-06-15 09:20:00');
+$staleAnchorDebouncedRows = $staleAnchorDebouncedDb->query('SELECT history_id, alert_type FROM registrationwatch_alert_history WHERE reminder_n = 0')->fetchAll(PDO::FETCH_ASSOC);
+assert_true((int)$staleAnchorDebouncedDb->query('SELECT COUNT(*) FROM registrationwatch_alert_history WHERE history_id = ' . $staleAnchorDebouncedProblemId)->fetchColumn() === 0, 'matured incident timing anchor must not become a replayed Unreachable alert');
+assert_true(count($staleAnchorDebouncedRows) === 1 && (int)$staleAnchorDebouncedRows[0]['history_id'] === $staleAnchorDebouncedFreshId && $staleAnchorDebouncedRows[0]['alert_type'] === 'not_registered' && $staleAnchorDebouncedEmailDelta === 1, 'matured positive debounce should deliver only the fresh Not registered transition');
+
+[$freshRecoveryDb, $freshRecoveryWatch, $freshRecoveryQueue] = $makeQueueFixture(300);
+[$freshRecoveryId, $freshRecoveryKey] = $insertQueueRegistration($freshRecoveryDb, 'debounce-old-problem-fresh-recovery');
+$oldUnsentProblemId = $insertQueueTransition($freshRecoveryDb, $freshRecoveryId, $freshRecoveryKey, 'debounce-old-problem-fresh-recovery', 'Reachable', 'Unreachable', '2026-06-15 08:00:00');
+$insertQueueTransition($freshRecoveryDb, $freshRecoveryId, $freshRecoveryKey, 'debounce-old-problem-fresh-recovery', 'Unreachable', 'Reachable', '2026-06-15 09:20:00');
+$freshRecoveryEmailDelta = $runQueueAndCountEmails($freshRecoveryQueue, $freshRecoveryWatch, '2026-06-15 09:20:00');
+assert_true((int)$freshRecoveryDb->query('SELECT COUNT(*) FROM registrationwatch_alert_history')->fetchColumn() === 0 && $freshRecoveryEmailDelta === 0, 'fresh recovery must not release an old unsent problem transition');
+assert_true($oldUnsentProblemId === 1, 'fresh-recovery stale-protection fixture should use the old problem transition as its incident anchor');
+
+[$reminderReplayDb, $reminderReplayWatch, $reminderReplayQueue] = $makeQueueFixture(0, 0);
+[$reminderReplayId, $reminderReplayKey] = $insertQueueRegistration($reminderReplayDb, 'reminder-replay', 'Unreachable', 'hourly');
+$insertQueueTransition($reminderReplayDb, $reminderReplayId, $reminderReplayKey, 'reminder-replay', 'Reachable', 'Unreachable', '2026-06-15 09:00:00');
+$runQueue($reminderReplayQueue, $reminderReplayWatch, '2026-06-15 09:00:00');
+$insertQueueTransition($reminderReplayDb, $reminderReplayId, $reminderReplayKey, 'reminder-replay', 'Unreachable', 'Reachable', '2026-06-15 09:00:10');
+$reminderReplayDb->exec("UPDATE registrationwatch_registrations SET last_known_status = 'Reachable' WHERE id = {$reminderReplayId}");
+$runQueue($reminderReplayQueue, $reminderReplayWatch, '2026-06-15 09:00:10');
+assert_true((int)$reminderReplayDb->query('SELECT COUNT(*) FROM registrationwatch_alert_escalation')->fetchColumn() === 0, 'genuine recovery must cancel the current hourly reminder');
+$newReminderProblemId = $insertQueueTransition($reminderReplayDb, $reminderReplayId, $reminderReplayKey, 'reminder-replay', 'Reachable', 'Unreachable', '2026-06-15 09:00:20');
+$reminderReplayDb->exec("UPDATE registrationwatch_registrations SET last_known_status = 'Unreachable' WHERE id = {$reminderReplayId}");
+$runQueue($reminderReplayQueue, $reminderReplayWatch, '2026-06-15 09:00:20');
+$reminderStateSql = "SELECT history_id, active_since, alert_count, last_alert_at, next_due_at FROM registrationwatch_alert_escalation WHERE registration_id = {$reminderReplayId}";
+$newReminderState = $reminderReplayDb->query($reminderStateSql)->fetch(PDO::FETCH_ASSOC);
+assert_true(is_array($newReminderState) && (int)$newReminderState['history_id'] === $newReminderProblemId && $newReminderState['active_since'] === '2026-06-15 09:00:20' && $newReminderState['last_alert_at'] === '2026-06-15 09:00:20' && (int)$newReminderState['alert_count'] === 0 && $newReminderState['next_due_at'] === '2026-06-15 10:00:20', 'a subsequent failure must start its own hourly schedule due at 10:00:20');
+$runQueue($reminderReplayQueue, $reminderReplayWatch, '2026-06-15 09:00:30');
+assert_true($reminderReplayDb->query($reminderStateSql)->fetch(PDO::FETCH_ASSOC) === $newReminderState, 'replaying the finished outage must not reset the new reminder schedule at 09:00:30');
+$reminderReplayDb->exec("UPDATE registrationwatch_alert_escalation SET alert_count = 3, last_alert_at = '2026-06-15 09:00:25' WHERE registration_id = {$reminderReplayId}");
+$countedReminderState = $reminderReplayDb->query($reminderStateSql)->fetch(PDO::FETCH_ASSOC);
+$runQueue($reminderReplayQueue, $reminderReplayWatch, '2026-06-15 09:00:40');
+$runQueue($reminderReplayQueue, $reminderReplayWatch, '2026-06-15 09:00:50');
+assert_true($reminderReplayDb->query($reminderStateSql)->fetch(PDO::FETCH_ASSOC) === $countedReminderState, 'repeated historical replay must preserve a nonzero reminder count and all current schedule fields');
+$insertQueueTransition($reminderReplayDb, $reminderReplayId, $reminderReplayKey, 'reminder-replay', 'Unreachable', 'Reachable', '2026-06-15 09:01:00');
+$reminderReplayDb->exec("UPDATE registrationwatch_registrations SET last_known_status = 'Reachable' WHERE id = {$reminderReplayId}");
+$runQueue($reminderReplayQueue, $reminderReplayWatch, '2026-06-15 09:01:00');
+assert_true((int)$reminderReplayDb->query('SELECT COUNT(*) FROM registrationwatch_alert_escalation')->fetchColumn() === 0, 'a genuine later recovery must still cancel the newer incident reminder');
+
+$replayDbFixture = $makeQueueFixture(300);
+[$replayDb, $replayWatch, $replayQueue] = $replayDbFixture;
+[$replayId, $replayKey] = $insertQueueRegistration($replayDb, 'debounce-replay-state', 'Unreachable', 'hourly');
+$oldProblemId = $insertQueueTransition($replayDb, $replayId, $replayKey, 'debounce-replay-state', 'Reachable', 'Unreachable', '2026-06-15 08:50:00');
+$oldRecoveryId = $insertQueueTransition($replayDb, $replayId, $replayKey, 'debounce-replay-state', 'Unreachable', 'Reachable', '2026-06-15 08:55:00');
+$currentProblemId = $insertQueueTransition($replayDb, $replayId, $replayKey, 'debounce-replay-state', 'Reachable', 'Unreachable', '2026-06-15 09:00:00');
+$replayEscalation = $replayDb->prepare('INSERT INTO registrationwatch_alert_escalation (registration_id, registration_key, extension, history_id, alert_type, active_since, last_alert_at, alert_count, next_due_at, repeat_mode, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+$replayEscalation->execute([$replayId, $replayKey, 'debounce-replay-state', $currentProblemId, 'unreachable', '2026-06-15 09:00:00', '2026-06-15 09:01:00', 4, '2026-06-15 10:10:00', 'hourly', '2026-06-15 09:00:00', '2026-06-15 09:01:00']);
+$runQueue($replayQueue, $replayWatch, '2026-06-15 09:05:00');
+$runQueue($replayQueue, $replayWatch, '2026-06-15 09:05:00');
+$replayState = $replayDb->query("SELECT history_id, active_since, alert_count, last_alert_at, next_due_at FROM registrationwatch_alert_escalation WHERE registration_id = {$replayId}")->fetch(PDO::FETCH_ASSOC);
+assert_true($oldRecoveryId < $currentProblemId && $oldProblemId < $oldRecoveryId, 'replay fixture should order the old recovery before the current incident');
+assert_true(is_array($replayState) && (int)$replayState['history_id'] === $currentProblemId, 'historical recovery replay should retain the current incident escalation');
+assert_true($replayState['active_since'] === '2026-06-15 09:00:00' && (int)$replayState['alert_count'] === 4 && $replayState['last_alert_at'] === '2026-06-15 09:01:00' && $replayState['next_due_at'] === '2026-06-15 10:10:00', 'replaying an older recovery must preserve every current repeat-schedule field');
+
+$persistentRecoveryEmailDelta = null;
+$insertQueueTransition($persistentDb, $persistentId, $persistentKey, 'debounce-persistent', 'Unreachable', 'Reachable', '2026-06-15 09:06:00');
+$persistentDb->exec("UPDATE registrationwatch_registrations SET last_known_status = 'Reachable' WHERE id = {$persistentId}");
+$persistentRecoveryEmailDelta = $runQueueAndCountEmails($persistentQueue, $persistentWatch, '2026-06-15 09:06:00');
+assert_true((int)$persistentDb->query("SELECT COUNT(*) FROM registrationwatch_alert_history WHERE alert_type = 'recovery'")->fetchColumn() === 1, 'recovery after a sent debounced alert should generate one recovery action');
+assert_true((int)$persistentDb->query("SELECT COUNT(*) FROM registrationwatch_alert_history WHERE alert_type = 'unreachable' AND reminder_n = 0")->fetchColumn() === 1, 'recovery processing must not re-emit the initial problem alert');
+assert_true((int)$persistentDb->query("SELECT COUNT(*) FROM registrationwatch_alert_history WHERE alert_type = 'recovery' AND result = 'suppressed'")->fetchColumn() === 0, 'successful initial problem delivery must not create a suppressed recovery decision');
+assert_true($persistentRecoveryEmailDelta === 1, 'recovery after a sent debounced alert should send exactly one recovery email for this incident');
+
+[$failedRecoveryDb, $failedRecoveryWatch, $failedRecoveryQueue] = $makeQueueFixture(300);
+[$failedRecoveryId, $failedRecoveryKey] = $insertQueueRegistration($failedRecoveryDb, 'debounce-failed-problem');
+$insertQueueTransition($failedRecoveryDb, $failedRecoveryId, $failedRecoveryKey, 'debounce-failed-problem', 'Reachable', 'Unreachable', '2026-06-15 12:00:00');
+$failedRecoveryTransitionId = $insertQueueTransition($failedRecoveryDb, $failedRecoveryId, $failedRecoveryKey, 'debounce-failed-problem', 'Unreachable', 'Reachable', '2026-06-15 12:05:00');
+CI_Email::$sendResults = [false];
+$failedInitialEmailDelta = $runQueueAndCountEmails($failedRecoveryQueue, $failedRecoveryWatch, '2026-06-15 12:05:00');
+$failedProblem = $failedRecoveryDb->query("SELECT alert_type, result FROM registrationwatch_alert_history WHERE alert_type = 'unreachable'")->fetch(PDO::FETCH_ASSOC);
+$failedRecoveryDecision = $failedRecoveryDb->query("SELECT registration_id, history_id, recipient, result, error FROM registrationwatch_alert_history WHERE alert_type = 'recovery'")->fetch(PDO::FETCH_ASSOC);
+assert_true(is_array($failedProblem) && $failedProblem['alert_type'] === 'unreachable' && $failedProblem['result'] === 'failed', 'same-pass qualifying problem failure should retain its failed Alert History result');
+assert_true(is_array($failedRecoveryDecision) && (int)$failedRecoveryDecision['registration_id'] === $failedRecoveryId && (int)$failedRecoveryDecision['history_id'] === $failedRecoveryTransitionId && $failedRecoveryDecision['recipient'] === 'admin@example.invalid' && $failedRecoveryDecision['result'] === 'suppressed' && $failedRecoveryDecision['error'] === 'No successful problem notification delivered', 'failed same-pass problem email should produce a recipient-specific suppressed recovery audit');
+assert_true($failedInitialEmailDelta === 1, 'a failed same-pass problem must be the only attempted email');
+$failedLaterEmailDelta = $runQueueAndCountEmails($failedRecoveryQueue, $failedRecoveryWatch, '2026-06-15 12:05:10');
+assert_true((int)$failedRecoveryDb->query("SELECT COUNT(*) FROM registrationwatch_alert_history WHERE alert_type = 'recovery'")->fetchColumn() === 1 && $failedLaterEmailDelta === 0, 'a later queue pass must not release recovery or duplicate its suppression audit after a failed initial problem email');
+
+[$unknownImmediateDb, $unknownImmediateWatch, $unknownImmediateQueue] = $makeQueueFixture(0);
+[$unknownImmediateId, $unknownImmediateKey] = $insertQueueRegistration($unknownImmediateDb, 'debounce-unknown-immediate', 'Unreachable');
+$insertQueueTransition($unknownImmediateDb, $unknownImmediateId, $unknownImmediateKey, 'debounce-unknown-immediate', 'Unknown', 'Unreachable', '2026-06-15 13:00:00');
+$insertQueueTransition($unknownImmediateDb, $unknownImmediateId, $unknownImmediateKey, 'debounce-unknown-immediate', 'Unreachable', 'Not registered', '2026-06-15 13:00:01');
+$unknownImmediateEmailDelta = $runQueueAndCountEmails($unknownImmediateQueue, $unknownImmediateWatch, '2026-06-15 13:00:01');
+$unknownImmediateTypes = $unknownImmediateDb->query('SELECT alert_type FROM registrationwatch_alert_history WHERE reminder_n = 0 ORDER BY history_id')->fetchAll(PDO::FETCH_COLUMN);
+assert_true($unknownImmediateTypes === ['not_registered'] && $unknownImmediateEmailDelta === 1, 'Unknown baseline should stay suppressed while a later alertable Not registered transition sends once with zero debounce');
+
+[$unknownDelayedDb, $unknownDelayedWatch, $unknownDelayedQueue] = $makeQueueFixture(300);
+[$unknownDelayedId, $unknownDelayedKey] = $insertQueueRegistration($unknownDelayedDb, 'debounce-unknown-delayed', 'Not registered');
+$insertQueueTransition($unknownDelayedDb, $unknownDelayedId, $unknownDelayedKey, 'debounce-unknown-delayed', 'Unknown', 'Unreachable', '2026-06-15 13:10:00');
+$insertQueueTransition($unknownDelayedDb, $unknownDelayedId, $unknownDelayedKey, 'debounce-unknown-delayed', 'Unreachable', 'Not registered', '2026-06-15 13:11:00');
+$unknownDelayedEarlyEmailDelta = $runQueueAndCountEmails($unknownDelayedQueue, $unknownDelayedWatch, '2026-06-15 13:15:59');
+assert_true((int)$unknownDelayedDb->query('SELECT COUNT(*) FROM registrationwatch_alert_history')->fetchColumn() === 0, 'Unknown baseline time must not shorten debounce for the first later alertable transition');
+$unknownDelayedQualifiedEmailDelta = $runQueueAndCountEmails($unknownDelayedQueue, $unknownDelayedWatch, '2026-06-15 13:16:00');
+$unknownDelayedAlert = $unknownDelayedDb->query('SELECT alert_type, history_id FROM registrationwatch_alert_history WHERE reminder_n = 0')->fetch(PDO::FETCH_ASSOC);
+assert_true(is_array($unknownDelayedAlert) && $unknownDelayedAlert['alert_type'] === 'not_registered' && (int)$unknownDelayedAlert['history_id'] === 2, 'later Not registered alert should qualify exactly 300 seconds after its own transition');
+assert_true($unknownDelayedEarlyEmailDelta === 0 && $unknownDelayedQualifiedEmailDelta === 1, 'Unknown baseline should not alert early and later qualify exactly one email on debounce expiry');
+
+$stormRecoveryRecipients = 'primary@example.invalid, secondary@example.invalid';
+[$stormRecoveryDb, $stormRecoveryWatch, $stormRecoveryQueue] = $makeQueueFixture(0, 1, '', $stormRecoveryRecipients);
+[$stormRecoveryId, $stormRecoveryKey] = $insertQueueRegistration($stormRecoveryDb, 'debounce-storm-recovery');
+$insertQueueTransition($stormRecoveryDb, $stormRecoveryId, $stormRecoveryKey, 'debounce-storm-recovery', 'Reachable', 'Unreachable', '2026-06-15 14:00:00');
+CI_Email::$sendResults = [true, false];
+$stormProblemEmailStart = count(CI_Email::$sentMessages);
+$stormProblemEmailDelta = $runQueueAndCountEmails($stormRecoveryQueue, $stormRecoveryWatch, '2026-06-15 14:00:00');
+$stormProblemCalls = array_slice(CI_Email::$sentMessages, $stormProblemEmailStart);
+$stormProblemResults = $stormRecoveryDb->query("SELECT recipient, result FROM registrationwatch_alert_history WHERE alert_type = 'unreachable' ORDER BY recipient")->fetchAll(PDO::FETCH_KEY_PAIR);
+assert_true(($stormProblemResults['primary@example.invalid'] ?? '') === 'storm_suppressed' && ($stormProblemResults['secondary@example.invalid'] ?? '') === 'storm_summary_failed', 'problem Storm Summary outcome should remain recipient-specific');
+assert_true($stormProblemEmailDelta === 2 && array_column($stormProblemCalls, 'recipient') === ['primary@example.invalid', 'secondary@example.invalid'], 'the original problem Storm Summary should attempt one delivery for each qualifying recipient');
+$stormRecoveryTransitionId = $insertQueueTransition($stormRecoveryDb, $stormRecoveryId, $stormRecoveryKey, 'debounce-storm-recovery', 'Unreachable', 'Reachable', '2026-06-15 14:01:00');
+$stormRecoveryDb->exec("UPDATE registrationwatch_registrations SET last_known_status = 'Reachable' WHERE id = {$stormRecoveryId}");
+CI_Email::$sendResults = [true, true];
+$stormRecoveryEmailStart = count(CI_Email::$sentMessages);
+$stormRecoveryEmailDelta = $runQueueAndCountEmails($stormRecoveryQueue, $stormRecoveryWatch, '2026-06-15 14:01:00');
+$stormRecoveryCalls = array_slice(CI_Email::$sentMessages, $stormRecoveryEmailStart);
+$stormRecoveryResults = $stormRecoveryDb->query("SELECT recipient, result FROM registrationwatch_alert_history WHERE alert_type = 'recovery' ORDER BY recipient")->fetchAll(PDO::FETCH_KEY_PAIR);
+$failedStormRecovery = $stormRecoveryDb->query("SELECT registration_id, history_id, recipient, result, error FROM registrationwatch_alert_history WHERE alert_type = 'recovery' AND recipient = 'secondary@example.invalid'")->fetch(PDO::FETCH_ASSOC);
+assert_true(($stormRecoveryResults['primary@example.invalid'] ?? '') === 'storm_suppressed', 'successfully storm-suppressed problem should authorize a storm-processed recovery for that recipient');
+assert_true(($stormRecoveryResults['secondary@example.invalid'] ?? '') === 'suppressed' && is_array($failedStormRecovery) && (int)$failedStormRecovery['registration_id'] === $stormRecoveryId && (int)$failedStormRecovery['history_id'] === $stormRecoveryTransitionId && $failedStormRecovery['error'] === 'Storm Summary delivery failed: CI_Email send failed.', 'failed Storm Summary should produce an accurate recovery suppression audit without authorizing recovery');
+assert_true((int)$stormRecoveryDb->query("SELECT COUNT(*) FROM registrationwatch_alert_history WHERE alert_type = 'recovery'")->fetchColumn() === 2 && $stormRecoveryDb->query("SELECT recipient FROM registrationwatch_alert_history WHERE alert_type = 'recovery' AND result = 'storm_suppressed'")->fetchColumn() === 'primary@example.invalid', 'recovery decisions should remain independent for successful and failed problem recipients');
+assert_true($stormRecoveryEmailDelta === 1 && count($stormRecoveryCalls) === 1 && $stormRecoveryCalls[0]['recipient'] === 'primary@example.invalid', 'only the successful problem recipient should receive the recovery Storm Summary');
+$stormRecoveryReplayEmails = $runQueueAndCountEmails($stormRecoveryQueue, $stormRecoveryWatch, '2026-06-15 14:01:10');
+assert_true($stormRecoveryReplayEmails === 0 && (int)$stormRecoveryDb->query("SELECT COUNT(*) FROM registrationwatch_alert_history WHERE alert_type = 'recovery'")->fetchColumn() === 2, 'replaying mixed Storm Summary outcomes must not send or duplicate recovery decisions');
+assert_true(strpos($stormRecoveryCalls[0]['subject'], 'Storm Summary') !== false && strpos($stormRecoveryCalls[0]['message'], 'debounce-storm-recovery - recovered to Reachable') !== false, 'primary recovery summary should contain the eligible recovery alert');
+
+$recipientSummaryRecipients = $stormRecoveryRecipients . ', observer@example.invalid';
+[$recipientSummaryDb, $recipientSummaryWatch] = $makeQueueFixture(0, 2, '', $recipientSummaryRecipients);
+$dispatchCollected = new ReflectionMethod($recipientSummaryWatch, 'dispatchCollectedAlerts');
+$dispatchCollected->setAccessible(true);
+$recipientSummaryAlerts = [
+	[
+		'registration_id' => 1,
+		'registration_key' => 'primary-key',
+		'extension' => '7101',
+		'history_id' => 101,
+		'reminder_n' => 0,
+		'alert_type' => 'unreachable',
+		'status' => 'Unreachable',
+		'recipient' => 'primary@example.invalid',
+		'subject' => 'Primary problem',
+		'message' => 'Primary problem details',
+	],
+	[
+		'registration_id' => 2,
+		'registration_key' => 'secondary-key',
+		'extension' => '7202',
+		'history_id' => 202,
+		'reminder_n' => 0,
+		'alert_type' => 'not_registered',
+		'status' => 'Not registered',
+		'recipient' => 'secondary@example.invalid',
+		'subject' => 'Secondary problem',
+		'message' => 'Secondary problem details',
+	],
+];
+CI_Email::$sendResults = [true, true];
+$recipientSummaryEmailStart = count(CI_Email::$sentMessages);
+$dispatchCollected->invoke($recipientSummaryWatch, $recipientSummaryAlerts, [], ['storm_threshold' => '2'], explode(', ', $recipientSummaryRecipients), '2026-06-15 14:02:00');
+$recipientSummaryCalls = array_slice(CI_Email::$sentMessages, $recipientSummaryEmailStart);
+$recipientSummaryCallsByRecipient = [];
+foreach ($recipientSummaryCalls as $summaryCall) {
+	$recipientSummaryCallsByRecipient[$summaryCall['recipient']] = $summaryCall;
+}
+assert_true(count($recipientSummaryCalls) === 2 && isset($recipientSummaryCallsByRecipient['primary@example.invalid'], $recipientSummaryCallsByRecipient['secondary@example.invalid']), 'Storm Summary should only be sent to recipients with collected alerts');
+assert_true(strpos($recipientSummaryCallsByRecipient['primary@example.invalid']['message'], '7101 - became Unreachable') !== false && strpos($recipientSummaryCallsByRecipient['primary@example.invalid']['message'], '7202 -') === false, 'primary Storm Summary should exclude the secondary recipient alert');
+assert_true(strpos($recipientSummaryCallsByRecipient['secondary@example.invalid']['message'], '7202 - became Not registered') !== false && strpos($recipientSummaryCallsByRecipient['secondary@example.invalid']['message'], '7101 -') === false, 'secondary Storm Summary should exclude the primary recipient alert');
+
+[$recoveryBatchDb, $recoveryBatchWatch, $recoveryBatchQueue] = $makeQueueFixture(0, 2);
+[$recoveryBatchIdA, $recoveryBatchKeyA] = $insertQueueRegistration($recoveryBatchDb, 'debounce-recovery-batch-a');
+[$recoveryBatchIdB, $recoveryBatchKeyB] = $insertQueueRegistration($recoveryBatchDb, 'debounce-recovery-batch-b');
+$insertQueueTransition($recoveryBatchDb, $recoveryBatchIdA, $recoveryBatchKeyA, 'debounce-recovery-batch-a', 'Reachable', 'Unreachable', '2026-06-15 14:10:00');
+$insertQueueTransition($recoveryBatchDb, $recoveryBatchIdB, $recoveryBatchKeyB, 'debounce-recovery-batch-b', 'Reachable', 'Unreachable', '2026-06-15 14:10:00');
+$runQueue($recoveryBatchQueue, $recoveryBatchWatch, '2026-06-15 14:10:00');
+$insertQueueTransition($recoveryBatchDb, $recoveryBatchIdA, $recoveryBatchKeyA, 'debounce-recovery-batch-a', 'Unreachable', 'Reachable', '2026-06-15 14:11:00');
+$insertQueueTransition($recoveryBatchDb, $recoveryBatchIdB, $recoveryBatchKeyB, 'debounce-recovery-batch-b', 'Unreachable', 'Reachable', '2026-06-15 14:11:00');
+$recoveryBatchDb->exec("UPDATE registrationwatch_registrations SET last_known_status = 'Reachable'");
+$runQueue($recoveryBatchQueue, $recoveryBatchWatch, '2026-06-15 14:11:00');
+assert_true((int)$recoveryBatchDb->query("SELECT COUNT(*) FROM registrationwatch_alert_history WHERE alert_type = 'storm_summary' AND result = 'sent'")->fetchColumn() === 2, 'a batch of recoveries should continue through Storm Threshold summary handling');
+assert_true((int)$recoveryBatchDb->query("SELECT COUNT(*) FROM registrationwatch_alert_history WHERE alert_type = 'recovery' AND result = 'storm_suppressed'")->fetchColumn() === 2, 'Storm Threshold should record both covered recovery actions');
+
+[$churnDb, $churnWatch, $churnQueue] = $makeQueueFixture(0, 0);
+[$churnId, $churnKey] = $insertQueueRegistration($churnDb, 'debounce-high-churn');
+$churnState = 'Reachable';
+$churnStart = strtotime('2026-06-15 10:58:00');
+for ($transitionIndex = 0; $transitionIndex < 105; $transitionIndex++) {
+	$nextState = $churnState === 'Reachable' ? 'Unreachable' : 'Reachable';
+	$createdAt = date('Y-m-d H:i:s', $churnStart + $transitionIndex);
+	$insertQueueTransition($churnDb, $churnId, $churnKey, 'debounce-high-churn', $churnState, $nextState, $createdAt);
+	$churnState = $nextState;
+}
+[$fairId, $fairKey] = $insertQueueRegistration($churnDb, 'debounce-fair-candidate');
+$insertQueueTransition($churnDb, $fairId, $fairKey, 'debounce-fair-candidate', 'Reachable', 'Unreachable', '2026-06-15 10:59:50');
+$runQueue($churnQueue, $churnWatch, '2026-06-15 11:00:00');
+assert_true((int)$churnDb->query("SELECT COUNT(*) FROM registrationwatch_alert_history WHERE registration_id = {$fairId} AND alert_type = 'unreachable'")->fetchColumn() === 1, 'high-churn history for one registration must not starve another recent candidate');
+
+[$immediateDb, $immediateWatch, $immediateQueue] = $makeQueueFixture(0);
+[$immediateId, $immediateKey] = $insertQueueRegistration($immediateDb, 'debounce-immediate', 'Not registered');
+$insertQueueTransition($immediateDb, $immediateId, $immediateKey, 'debounce-immediate', 'Reachable', 'Not registered', '2026-06-15 10:00:00');
+$runQueue($immediateQueue, $immediateWatch, '2026-06-15 10:00:00');
+assert_true((int)$immediateDb->query('SELECT COUNT(*) FROM registrationwatch_alert_history WHERE reminder_n = 0')->fetchColumn() === 1, 'zero debounce should preserve immediate initial-alert eligibility');
+
+[$staleDb, $staleWatch, $staleQueue] = $makeQueueFixture(300);
+[$staleId, $staleKey] = $insertQueueRegistration($staleDb, 'debounce-stale', 'Unreachable');
+$insertQueueTransition($staleDb, $staleId, $staleKey, 'debounce-stale', 'Reachable', 'Unreachable', '2026-06-15 09:00:00');
+$runQueue($staleQueue, $staleWatch, '2026-06-15 10:00:00');
+assert_true((int)$staleDb->query('SELECT COUNT(*) FROM registrationwatch_alert_history')->fetchColumn() === 0, 'stale unhealthy transition must not be replayed after the freshness window');
+
+[$ongoingSnoozedDb, $ongoingSnoozedWatch, $ongoingSnoozedQueue] = $makeQueueFixture(0, 20, date('Y-m-d H:i:s', time() + 3600));
+[$ongoingSnoozedId, $ongoingSnoozedKey] = $insertQueueRegistration($ongoingSnoozedDb, 'debounce-snoozed-ongoing', 'Unreachable');
+$insertQueueTransition($ongoingSnoozedDb, $ongoingSnoozedId, $ongoingSnoozedKey, 'debounce-snoozed-ongoing', 'Reachable', 'Unreachable', '2026-06-15 10:00:00');
+$runQueue($ongoingSnoozedQueue, $ongoingSnoozedWatch, '2026-06-15 10:01:00');
+$ongoingSnoozedResult = $ongoingSnoozedDb->query('SELECT result FROM registrationwatch_alert_history')->fetchColumn();
+assert_true((string)$ongoingSnoozedResult === 'suppressed', 'ongoing snoozed eligible alert should retain existing suppression behavior; got ' . var_export($ongoingSnoozedResult, true));
+
+[$snoozedDb, $snoozedWatch, $snoozedQueue] = $makeQueueFixture(0, 20, date('Y-m-d H:i:s', time() + 3600));
+[$snoozedId, $snoozedKey] = $insertQueueRegistration($snoozedDb, 'debounce-snoozed', 'Unreachable');
+$snoozedProblemId = $insertQueueTransition($snoozedDb, $snoozedId, $snoozedKey, 'debounce-snoozed', 'Reachable', 'Unreachable', '2026-06-15 10:01:00');
+$snoozedRecoveryId = $insertQueueTransition($snoozedDb, $snoozedId, $snoozedKey, 'debounce-snoozed', 'Unreachable', 'Reachable', '2026-06-15 10:02:00');
+$snoozedEmailDelta = $runQueueAndCountEmails($snoozedQueue, $snoozedWatch, '2026-06-15 10:02:00');
+$snoozedProblem = $snoozedDb->query("SELECT history_id, result, error FROM registrationwatch_alert_history WHERE alert_type = 'unreachable'")->fetch(PDO::FETCH_ASSOC);
+$snoozedRecovery = $snoozedDb->query("SELECT history_id, result, error FROM registrationwatch_alert_history WHERE alert_type = 'recovery'")->fetch(PDO::FETCH_ASSOC);
+assert_true(is_array($snoozedProblem) && (int)$snoozedProblem['history_id'] === $snoozedProblemId && $snoozedProblem['result'] === 'suppressed' && $snoozedProblem['error'] === 'Monitoring snoozed', 'snoozed eligible problem alert should retain existing suppression behavior');
+assert_true(is_array($snoozedRecovery) && (int)$snoozedRecovery['history_id'] === $snoozedRecoveryId && $snoozedRecovery['result'] === 'suppressed' && $snoozedRecovery['error'] === 'Original problem alert suppressed (Monitoring snoozed)', 'recovery withheld by Monitoring Snooze should be audited with its reason');
+assert_true($snoozedEmailDelta === 0, 'Monitoring Snooze should continue to send neither problem nor recovery email');
+
+[$recoveryDisabledDb, $recoveryDisabledWatch, $recoveryDisabledQueue] = $makeQueueFixture(0);
+$recoveryDisabledDb->prepare("UPDATE registrationwatch_settings SET setting_value = '0' WHERE setting_key = 'alert_on_recovery'")->execute();
+[$recoveryDisabledId, $recoveryDisabledKey] = $insertQueueRegistration($recoveryDisabledDb, 'recovery-disabled');
+$insertQueueTransition($recoveryDisabledDb, $recoveryDisabledId, $recoveryDisabledKey, 'recovery-disabled', 'Reachable', 'Unreachable', '2026-06-15 10:03:00');
+$insertQueueTransition($recoveryDisabledDb, $recoveryDisabledId, $recoveryDisabledKey, 'recovery-disabled', 'Unreachable', 'Reachable', '2026-06-15 10:04:00');
+$recoveryDisabledEmailDelta = $runQueueAndCountEmails($recoveryDisabledQueue, $recoveryDisabledWatch, '2026-06-15 10:04:00');
+assert_true($recoveryDisabledEmailDelta === 1 && (int)$recoveryDisabledDb->query("SELECT COUNT(*) FROM registrationwatch_alert_history WHERE alert_type = 'recovery'")->fetchColumn() === 0, 'disabled recovery notifications must not send or create recovery suppression records');
+
+[$monitoringDisabledDb, $monitoringDisabledWatch, $monitoringDisabledQueue] = $makeQueueFixture(0);
+[$monitoringDisabledId, $monitoringDisabledKey] = $insertQueueRegistration($monitoringDisabledDb, 'monitoring-disabled');
+$insertQueueTransition($monitoringDisabledDb, $monitoringDisabledId, $monitoringDisabledKey, 'monitoring-disabled', 'Reachable', 'Unreachable', '2026-06-15 10:05:00');
+$insertQueueTransition($monitoringDisabledDb, $monitoringDisabledId, $monitoringDisabledKey, 'monitoring-disabled', 'Unreachable', 'Reachable', '2026-06-15 10:06:00');
+$monitoringDisabledDb->prepare('UPDATE registrationwatch_registrations SET enabled = 0 WHERE id = ?')->execute([$monitoringDisabledId]);
+$monitoringDisabledEmailDelta = $runQueueAndCountEmails($monitoringDisabledQueue, $monitoringDisabledWatch, '2026-06-15 10:06:00');
+assert_true($monitoringDisabledEmailDelta === 0 && (int)$monitoringDisabledDb->query('SELECT COUNT(*) FROM registrationwatch_alert_history')->fetchColumn() === 0, 'disabled monitoring must not create retrospective notification or recovery audit records');
+
+[$stormDb, $stormWatch, $stormQueue] = $makeQueueFixture(0, 2);
+[$stormIdA, $stormKeyA] = $insertQueueRegistration($stormDb, 'debounce-storm-a', 'Unreachable');
+[$stormIdB, $stormKeyB] = $insertQueueRegistration($stormDb, 'debounce-storm-b', 'Unreachable');
+$insertQueueTransition($stormDb, $stormIdA, $stormKeyA, 'debounce-storm-a', 'Reachable', 'Unreachable', '2026-06-15 10:01:00');
+$insertQueueTransition($stormDb, $stormIdB, $stormKeyB, 'debounce-storm-b', 'Reachable', 'Unreachable', '2026-06-15 10:01:00');
+$runQueue($stormQueue, $stormWatch, '2026-06-15 10:01:00');
+assert_true((int)$stormDb->query("SELECT COUNT(*) FROM registrationwatch_alert_history WHERE alert_type = 'storm_summary'")->fetchColumn() === 1, 'storm threshold should continue to summarize eligible alert batches');
+assert_true((int)$stormDb->query("SELECT COUNT(*) FROM registrationwatch_alert_history WHERE alert_type = 'unreachable' AND result = 'storm_suppressed'")->fetchColumn() === 2, 'successful storm summary should suppress individual alert deliveries');
+
+$confirmedRepeatFailures = [];
+$runConfirmedRepeatRegression = function (string $name, callable $regression) use (&$confirmedRepeatFailures): void {
+	try {
+		$regression();
+	} catch (Throwable $e) {
+		$confirmedRepeatFailures[] = $name . ': ' . $e->getMessage();
+	}
+};
+
+$runConfirmedRepeatRegression('debounced same-state repeats', function () use ($makeQueueFixture, $insertQueueRegistration, $insertQueueTransition, $runQueue, $runQueueAndCountEmails, $setQueueLiveStatus): void {
+	[$database, $watch, $queue] = $makeQueueFixture(300, 0);
+	[$registrationId, $registrationKey] = $insertQueueRegistration($database, 'repeat-debounce-unreachable', 'Reachable', '5m', '192.0.2.101');
+	$setQueueLiveStatus($watch, 'repeat-debounce-unreachable', '192.0.2.101', 'Unreachable');
+	$insertQueueTransition($database, $registrationId, $registrationKey, 'repeat-debounce-unreachable', 'Reachable', 'Unreachable', '2026-06-15 09:00:00');
+	assert_true($runQueueAndCountEmails($queue, $watch, '2026-06-15 09:04:59') === 0, 'debounced outage must not email before the initial alert is due');
+	assert_true($runQueueAndCountEmails($queue, $watch, '2026-06-15 09:05:00') === 1, 'debounced outage must send its initial problem email at 09:05');
+	assert_true($runQueueAndCountEmails($queue, $watch, '2026-06-15 09:05:20') === 0, 'replaying the incident must not duplicate the initial problem email');
+	foreach ([
+		'2026-06-15 09:10:00' => '2026-06-15 09:15:00',
+		'2026-06-15 09:15:00' => '2026-06-15 09:20:00',
+		'2026-06-15 09:20:00' => '2026-06-15 09:25:00',
+	] as $dueAt => $nextDueAt) {
+		assert_true($runQueueAndCountEmails($queue, $watch, $dueAt) === 1, 'persistent Unreachable should send one reminder at ' . $dueAt);
+		$state = $database->query("SELECT alert_count, next_due_at FROM registrationwatch_alert_escalation WHERE registration_id = {$registrationId}")->fetch(PDO::FETCH_ASSOC);
+		assert_true((int)$state['alert_count'] === count($database->query("SELECT id FROM registrationwatch_alert_history WHERE registration_id = {$registrationId} AND reminder_n > 0")->fetchAll(PDO::FETCH_COLUMN)), 'reminder counter should advance once per delivered reminder');
+		assert_true($state['next_due_at'] === $nextDueAt, 'next reminder should be scheduled from the last delivered repeat');
+	}
+	$history = $database->query("SELECT alert_type, status, reminder_n, subject FROM registrationwatch_alert_history WHERE registration_id = {$registrationId} ORDER BY reminder_n")->fetchAll(PDO::FETCH_ASSOC);
+	assert_true(array_map('intval', array_column($history, 'reminder_n')) === [0, 1, 2, 3], 'Alert History should contain the initial alert and reminders 1 through 3');
+	assert_true(array_column($history, 'alert_type') === ['unreachable', 'unreachable', 'unreachable', 'unreachable'], 'same-state Alert History should retain the Unreachable type');
+	assert_true(array_column($history, 'status') === ['Unreachable', 'Unreachable', 'Unreachable', 'Unreachable'], 'same-state Alert History should retain the live status');
+	assert_true(strpos($history[3]['subject'], 'still Unreachable') !== false, 'reminder subject should name the current unhealthy status');
+	$insertQueueTransition($database, $registrationId, $registrationKey, 'repeat-debounce-unreachable', 'Unreachable', 'Reachable', '2026-06-15 09:22:00');
+	$setQueueLiveStatus($watch, 'repeat-debounce-unreachable', '192.0.2.101', 'Reachable');
+	assert_true($runQueueAndCountEmails($queue, $watch, '2026-06-15 09:22:00') === 1, 'recovery after multiple reminders should send exactly one recovery email');
+	assert_true($database->query("SELECT result FROM registrationwatch_alert_history WHERE registration_id = {$registrationId} AND alert_type = 'recovery'")->fetchColumn() === 'sent', 'recovery after multiple reminders should be recorded as sent');
+	assert_true((int)$database->query("SELECT COUNT(*) FROM registrationwatch_alert_escalation WHERE registration_id = {$registrationId}")->fetchColumn() === 0, 'recovery after multiple reminders should cancel the escalation');
+});
+
+$runConfirmedRepeatRegression('Not registered repeats', function () use ($makeQueueFixture, $insertQueueRegistration, $insertQueueTransition, $runQueueAndCountEmails, $setQueueLiveStatus): void {
+	[$database, $watch, $queue] = $makeQueueFixture(300, 0);
+	[$registrationId, $registrationKey] = $insertQueueRegistration($database, 'repeat-debounce-not-registered', 'Reachable', '5m', '192.0.2.102');
+	$setQueueLiveStatus($watch, 'repeat-debounce-not-registered', '192.0.2.102', 'Not registered');
+	$insertQueueTransition($database, $registrationId, $registrationKey, 'repeat-debounce-not-registered', 'Reachable', 'Not registered', '2026-06-15 09:00:00');
+	assert_true($runQueueAndCountEmails($queue, $watch, '2026-06-15 09:05:00') === 1, 'debounced Not registered should send its initial problem email');
+	foreach (['2026-06-15 09:10:00', '2026-06-15 09:15:00', '2026-06-15 09:20:00'] as $dueAt) {
+		assert_true($runQueueAndCountEmails($queue, $watch, $dueAt) === 1, 'persistent Not registered should send one reminder at ' . $dueAt);
+	}
+	$history = $database->query("SELECT alert_type, status, reminder_n, subject FROM registrationwatch_alert_history WHERE registration_id = {$registrationId} ORDER BY reminder_n")->fetchAll(PDO::FETCH_ASSOC);
+	assert_true(array_map('intval', array_column($history, 'reminder_n')) === [0, 1, 2, 3], 'Not registered history should number the initial alert and first three repeats');
+	assert_true(array_column($history, 'alert_type') === ['not_registered', 'not_registered', 'not_registered', 'not_registered'] && array_column($history, 'status') === ['Not registered', 'Not registered', 'Not registered', 'Not registered'], 'Not registered reminders must use matching alert type and status');
+	assert_true(strpos($history[3]['subject'], 'still Not registered') !== false, 'Not registered reminder subject must use the current state');
+});
+
+$runConfirmedRepeatRegression('reverse unhealthy handoff', function () use ($makeQueueFixture, $insertQueueRegistration, $insertQueueTransition, $runQueueAndCountEmails, $setQueueLiveStatus): void {
+	[$database, $watch, $queue] = $makeQueueFixture(300, 0);
+	[$registrationId, $registrationKey] = $insertQueueRegistration($database, 'repeat-reverse-handoff', 'Reachable', '5m', '192.0.2.103');
+	$setQueueLiveStatus($watch, 'repeat-reverse-handoff', '192.0.2.103', 'Not registered');
+	$insertQueueTransition($database, $registrationId, $registrationKey, 'repeat-reverse-handoff', 'Reachable', 'Not registered', '2026-06-15 09:00:00');
+	$initialEmailDelta = $runQueueAndCountEmails($queue, $watch, '2026-06-15 09:05:00');
+	$stateBefore = $database->query("SELECT active_since, last_alert_at, alert_count, next_due_at FROM registrationwatch_alert_escalation WHERE registration_id = {$registrationId}")->fetch(PDO::FETCH_ASSOC);
+	$insertQueueTransition($database, $registrationId, $registrationKey, 'repeat-reverse-handoff', 'Not registered', 'Unreachable', '2026-06-15 09:08:00');
+	$setQueueLiveStatus($watch, 'repeat-reverse-handoff', '192.0.2.103', 'Unreachable');
+	$handoffEmailDelta = $runQueueAndCountEmails($queue, $watch, '2026-06-15 09:08:00');
+	$stateAfter = $database->query("SELECT active_since, last_alert_at, alert_count, next_due_at FROM registrationwatch_alert_escalation WHERE registration_id = {$registrationId}")->fetch(PDO::FETCH_ASSOC);
+	assert_true($stateAfter === $stateBefore, 'unhealthy-state handoff must preserve every schedule field');
+	$reminderEmailDelta = $runQueueAndCountEmails($queue, $watch, '2026-06-15 09:10:00');
+	$reminder = $database->query("SELECT alert_type, status, reminder_n, subject FROM registrationwatch_alert_history WHERE registration_id = {$registrationId} AND reminder_n = 1")->fetch(PDO::FETCH_ASSOC);
+	assert_true(is_array($reminder) && $reminder['alert_type'] === 'unreachable' && $reminder['status'] === 'Unreachable' && (int)$reminder['reminder_n'] === 1, 'handoff reminder must match the live Unreachable state');
+	assert_true(strpos($reminder['subject'], 'still Unreachable') !== false, 'handoff reminder subject must match the live Unreachable state');
+	$initialProblemCount = (int)$database->query("SELECT COUNT(*) FROM registrationwatch_alert_history WHERE registration_id = {$registrationId} AND reminder_n = 0 AND alert_type IN ('unreachable', 'not_registered')")->fetchColumn();
+	assert_true([$initialEmailDelta, $handoffEmailDelta, $reminderEmailDelta] === [1, 0, 1] && $initialProblemCount === 1 && count(CI_Email::$sentMessages) === 2, 'Not registered to Unreachable should send one initial and one repeat, not an extra initial; got ' . json_encode([$initialEmailDelta, $handoffEmailDelta, $reminderEmailDelta, $initialProblemCount, count(CI_Email::$sentMessages)]));
+});
+
+$runConfirmedRepeatRegression('stale escalation type follows live state', function () use ($makeQueueFixture, $insertQueueRegistration, $runQueueAndCountEmails, $setQueueLiveStatus): void {
+	[$database, $watch, $queue] = $makeQueueFixture(300, 0);
+	[$registrationId, $registrationKey] = $insertQueueRegistration($database, 'repeat-stale-type', 'Not registered', '5m', '192.0.2.106');
+	$setQueueLiveStatus($watch, 'repeat-stale-type', '192.0.2.106', 'Not registered');
+	$database->prepare('INSERT INTO registrationwatch_alert_escalation (registration_id, registration_key, extension, history_id, alert_type, active_since, last_alert_at, alert_count, next_due_at, repeat_mode) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')->execute([$registrationId, $registrationKey, 'repeat-stale-type', 1, 'unreachable', '2026-06-15 09:00:00', '2026-06-15 09:05:00', 0, '2026-06-15 09:10:00', '5m']);
+	assert_true($runQueueAndCountEmails($queue, $watch, '2026-06-15 09:10:00') === 1, 'continuously unhealthy live state should remain eligible when escalation type is stale');
+	$history = $database->query("SELECT alert_type, status, reminder_n, subject FROM registrationwatch_alert_history WHERE registration_id = {$registrationId}")->fetch(PDO::FETCH_ASSOC);
+	$stateType = $database->query("SELECT alert_type FROM registrationwatch_alert_escalation WHERE registration_id = {$registrationId}")->fetchColumn();
+	assert_true(is_array($history) && $history['alert_type'] === 'not_registered' && $history['status'] === 'Not registered' && (int)$history['reminder_n'] === 1, 'stale escalation reminder history must match the current live state');
+	assert_true($stateType === 'not_registered' && strpos($history['subject'], 'still Not registered') !== false, 'stale escalation should retarget its type and subject to the current live state');
+});
+
+$runConfirmedRepeatRegression('recovery after successful repeat', function () use ($makeQueueFixture, $insertQueueRegistration, $insertQueueTransition, $runQueueAndCountEmails, $setQueueLiveStatus): void {
+	[$database, $watch, $queue] = $makeQueueFixture(300, 0);
+	[$registrationId, $registrationKey] = $insertQueueRegistration($database, 'repeat-authorises-recovery', 'Reachable', '5m', '192.0.2.104');
+	$setQueueLiveStatus($watch, 'repeat-authorises-recovery', '192.0.2.104', 'Unreachable');
+	$insertQueueTransition($database, $registrationId, $registrationKey, 'repeat-authorises-recovery', 'Reachable', 'Unreachable', '2026-06-15 09:00:00');
+	CI_Email::$sendResults = [false, true, true];
+	assert_true($runQueueAndCountEmails($queue, $watch, '2026-06-15 09:05:00') === 1, 'failed initial problem email should still be attempted');
+	assert_true($runQueueAndCountEmails($queue, $watch, '2026-06-15 09:10:00') === 1, 'first repeat should still be attempted after initial failure');
+	$insertQueueTransition($database, $registrationId, $registrationKey, 'repeat-authorises-recovery', 'Unreachable', 'Reachable', '2026-06-15 09:12:00');
+	$setQueueLiveStatus($watch, 'repeat-authorises-recovery', '192.0.2.104', 'Reachable');
+	assert_true($runQueueAndCountEmails($queue, $watch, '2026-06-15 09:12:00') === 1, 'successful repeat should authorize one recovery email');
+	$recovery = $database->query("SELECT result FROM registrationwatch_alert_history WHERE registration_id = {$registrationId} AND alert_type = 'recovery'")->fetchColumn();
+	assert_true($recovery === 'sent', 'recovery Alert History should record successful delivery after a successful repeat');
+	assert_true((int)$database->query("SELECT COUNT(*) FROM registrationwatch_alert_history WHERE registration_id = {$registrationId} AND alert_type = 'recovery' AND result = 'suppressed'")->fetchColumn() === 0, 'successful repeat notification must continue to authorize recovery without a suppression record');
+	assert_true((int)$database->query("SELECT COUNT(*) FROM registrationwatch_alert_escalation WHERE registration_id = {$registrationId}")->fetchColumn() === 0, 'genuine recovery should cancel the active repeat schedule');
+});
+
+$runConfirmedRepeatRegression('Unreachable to Not registered handoff', function () use ($makeQueueFixture, $insertQueueRegistration, $insertQueueTransition, $runQueueAndCountEmails, $setQueueLiveStatus): void {
+	[$database, $watch, $queue] = $makeQueueFixture(300, 0);
+	[$registrationId, $registrationKey] = $insertQueueRegistration($database, 'repeat-forward-handoff', 'Reachable', '5m', '192.0.2.105');
+	$setQueueLiveStatus($watch, 'repeat-forward-handoff', '192.0.2.105', 'Unreachable');
+	$insertQueueTransition($database, $registrationId, $registrationKey, 'repeat-forward-handoff', 'Reachable', 'Unreachable', '2026-06-15 09:00:00');
+	$initialEmailDelta = $runQueueAndCountEmails($queue, $watch, '2026-06-15 09:05:00');
+	$stateBefore = $database->query("SELECT active_since, last_alert_at, alert_count, next_due_at FROM registrationwatch_alert_escalation WHERE registration_id = {$registrationId}")->fetch(PDO::FETCH_ASSOC);
+	$insertQueueTransition($database, $registrationId, $registrationKey, 'repeat-forward-handoff', 'Unreachable', 'Not registered', '2026-06-15 09:08:00');
+	$setQueueLiveStatus($watch, 'repeat-forward-handoff', '192.0.2.105', 'Not registered');
+	$handoffEmailDelta = $runQueueAndCountEmails($queue, $watch, '2026-06-15 09:08:00');
+	$stateAfter = $database->query("SELECT active_since, last_alert_at, alert_count, next_due_at FROM registrationwatch_alert_escalation WHERE registration_id = {$registrationId}")->fetch(PDO::FETCH_ASSOC);
+	assert_true($stateAfter === $stateBefore, 'Unreachable to Not registered handoff must preserve the repeat clock and counter');
+	$reminderEmailDelta = $runQueueAndCountEmails($queue, $watch, '2026-06-15 09:10:00');
+	$reminder = $database->query("SELECT alert_type, status, reminder_n, subject FROM registrationwatch_alert_history WHERE registration_id = {$registrationId} AND reminder_n = 1")->fetch(PDO::FETCH_ASSOC);
+	assert_true(is_array($reminder) && $reminder['alert_type'] === 'not_registered' && $reminder['status'] === 'Not registered' && (int)$reminder['reminder_n'] === 1, 'forward handoff reminder must match the current state');
+	assert_true(strpos($reminder['subject'], 'still Not registered') !== false, 'forward handoff reminder subject must match the current state');
+	$initialProblemCount = (int)$database->query("SELECT COUNT(*) FROM registrationwatch_alert_history WHERE registration_id = {$registrationId} AND reminder_n = 0 AND alert_type IN ('unreachable', 'not_registered')")->fetchColumn();
+	assert_true([$initialEmailDelta, $handoffEmailDelta, $reminderEmailDelta] === [1, 1, 1] && $initialProblemCount === 2 && count(CI_Email::$sentMessages) === 3, 'Unreachable to Not registered should send two eligible initial alerts plus one repeat; got ' . json_encode([$initialEmailDelta, $handoffEmailDelta, $reminderEmailDelta, $initialProblemCount, count(CI_Email::$sentMessages)]));
+});
+
+$runConfirmedRepeatRegression('conflicting escalation keeps newer incident only', function () use ($makeQueueFixture, $insertQueueRegistration, $runQueueAndCountEmails, $setQueueLiveStatus): void {
+	[$database, $watch, $queue] = $makeQueueFixture(300, 0);
+	[$registrationId, $registrationKey] = $insertQueueRegistration($database, 'repeat-conflicting-escalations', 'Not registered', '5m', '192.0.2.125');
+	$setQueueLiveStatus($watch, 'repeat-conflicting-escalations', '192.0.2.125', 'Not registered');
+	$insertEscalation = $database->prepare('INSERT INTO registrationwatch_alert_escalation (registration_id, registration_key, extension, history_id, alert_type, active_since, last_alert_at, alert_count, next_due_at, repeat_mode) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+	$insertEscalation->execute([$registrationId, $registrationKey, 'repeat-conflicting-escalations', 1, 'unreachable', '2026-06-15 09:00:00', '2026-06-15 09:05:00', 0, '2026-06-15 09:10:00', '5m']);
+	$insertEscalation->execute([$registrationId, $registrationKey, 'repeat-conflicting-escalations', 2, 'not_registered', '2026-06-15 09:08:00', '2026-06-15 09:08:00', 0, '2026-06-15 09:10:00', '5m']);
+	$emailDelta = $runQueueAndCountEmails($queue, $watch, '2026-06-15 09:10:00');
+	$history = $database->query("SELECT history_id, alert_type, status, reminder_n FROM registrationwatch_alert_history WHERE registration_id = {$registrationId} ORDER BY history_id")->fetchAll(PDO::FETCH_ASSOC);
+	$escalations = $database->query("SELECT history_id, alert_type, active_since, last_alert_at, alert_count, next_due_at FROM registrationwatch_alert_escalation WHERE registration_id = {$registrationId}")->fetchAll(PDO::FETCH_ASSOC);
+	assert_true($emailDelta === 1 && count($history) === 1 && (int)$history[0]['history_id'] === 2 && $history[0]['alert_type'] === 'not_registered' && $history[0]['status'] === 'Not registered' && (int)$history[0]['reminder_n'] === 1, 'conflicting escalation must emit only the newer incident reminder; got ' . json_encode([$emailDelta, $history]));
+	assert_true(count($escalations) === 1 && (int)$escalations[0]['history_id'] === 2 && $escalations[0]['alert_type'] === 'not_registered' && $escalations[0]['active_since'] === '2026-06-15 09:08:00' && $escalations[0]['last_alert_at'] === '2026-06-15 09:10:00' && (int)$escalations[0]['alert_count'] === 1 && $escalations[0]['next_due_at'] === '2026-06-15 09:15:00', 'older conflicting escalation must be removed while preserving and advancing the newer schedule');
+});
+
+$runConfirmedRepeatRegression('cross-state reminders obey alert settings', function () use ($makeQueueFixture, $insertQueueRegistration, $insertQueueTransition, $runQueueAndCountEmails, $setQueueLiveStatus): void {
+	$cases = [
+		['repeat-setting-reverse', 'Not registered', 'Unreachable', 'alert_on_unreachable', '192.0.2.126'],
+		['repeat-setting-forward', 'Unreachable', 'Not registered', 'alert_on_not_registered', '192.0.2.127'],
+	];
+	foreach ($cases as [$extension, $initialState, $nextState, $disabledSetting, $sourceIp]) {
+		[$database, $watch, $queue] = $makeQueueFixture(300, 0);
+		$database->prepare('UPDATE registrationwatch_settings SET setting_value = ? WHERE setting_key = ?')->execute(['0', $disabledSetting]);
+		[$registrationId, $registrationKey] = $insertQueueRegistration($database, $extension, 'Reachable', '5m', $sourceIp);
+		$setQueueLiveStatus($watch, $extension, $sourceIp, $initialState);
+		$insertQueueTransition($database, $registrationId, $registrationKey, $extension, 'Reachable', $initialState, '2026-06-15 09:00:00');
+		$initialEmailDelta = $runQueueAndCountEmails($queue, $watch, '2026-06-15 09:05:00');
+		$insertQueueTransition($database, $registrationId, $registrationKey, $extension, $initialState, $nextState, '2026-06-15 09:08:00');
+		$setQueueLiveStatus($watch, $extension, $sourceIp, $nextState);
+		$runQueueAndCountEmails($queue, $watch, '2026-06-15 09:08:00');
+		$beforeDue = $database->query("SELECT active_since, last_alert_at, alert_count, next_due_at FROM registrationwatch_alert_escalation WHERE registration_id = {$registrationId}")->fetch(PDO::FETCH_ASSOC);
+		$disabledDueEmailDelta = $runQueueAndCountEmails($queue, $watch, '2026-06-15 09:10:00');
+		$afterDisabledDue = $database->query("SELECT active_since, last_alert_at, alert_count, next_due_at FROM registrationwatch_alert_escalation WHERE registration_id = {$registrationId}")->fetch(PDO::FETCH_ASSOC);
+		$database->prepare('UPDATE registrationwatch_settings SET setting_value = ? WHERE setting_key = ?')->execute(['1', $disabledSetting]);
+		$reenabledEmailDelta = $runQueueAndCountEmails($queue, $watch, '2026-06-15 09:20:01');
+		$reminder = $database->query("SELECT alert_type, status, reminder_n FROM registrationwatch_alert_history WHERE registration_id = {$registrationId} AND reminder_n = 1")->fetch(PDO::FETCH_ASSOC);
+		assert_true($initialEmailDelta === 1 && $disabledDueEmailDelta === 0 && $reenabledEmailDelta === 1 && $beforeDue === $afterDisabledDue, $extension . ' disabled state alerts should defer, not consume, the active reminder cycle');
+		assert_true(is_array($reminder) && (int)$reminder['reminder_n'] === 1 && $reminder['alert_type'] === ($nextState === 'Unreachable' ? 'unreachable' : 'not_registered') && $reminder['status'] === $nextState, $extension . ' re-enabled reminder should use the current state and next sequential number');
+	}
+});
+
+$runConfirmedRepeatRegression('all repeat modes with debounce', function () use ($makeQueueFixture, $insertQueueRegistration, $insertQueueTransition, $runQueueAndCountEmails, $setQueueLiveStatus): void {
+	$modes = [
+		'never' => null,
+		'5m' => 300,
+		'hourly' => 3600,
+		'daily' => 86400,
+		'escalating' => 300,
+	];
+	foreach ($modes as $mode => $interval) {
+		[$database, $watch, $queue] = $makeQueueFixture(300, 0);
+		$database->prepare("UPDATE registrationwatch_settings SET setting_value = ? WHERE setting_key = 'repeat_mode'")->execute([$mode]);
+		$extension = 'repeat-global-' . $mode;
+		$sourceIp = '192.0.2.' . (110 + count($database->query('SELECT id FROM registrationwatch_registrations')->fetchAll(PDO::FETCH_COLUMN)));
+		[$registrationId, $registrationKey] = $insertQueueRegistration($database, $extension, 'Reachable', '', $sourceIp);
+		$setQueueLiveStatus($watch, $extension, $sourceIp, 'Unreachable');
+		$insertQueueTransition($database, $registrationId, $registrationKey, $extension, 'Reachable', 'Unreachable', '2026-06-15 09:00:00');
+		assert_true($runQueueAndCountEmails($queue, $watch, '2026-06-15 09:04:59') === 0, $mode . ' mode must honor debounce before initial delivery');
+		assert_true($runQueueAndCountEmails($queue, $watch, '2026-06-15 09:05:00') === 1, $mode . ' mode should send the initial alert after debounce');
+		$state = $database->query("SELECT repeat_mode, alert_count, next_due_at FROM registrationwatch_alert_escalation WHERE registration_id = {$registrationId}")->fetch(PDO::FETCH_ASSOC);
+		if ($interval === null) {
+			assert_true($state === false, 'Never mode must not create an escalation');
+			assert_true($runQueueAndCountEmails($queue, $watch, '2026-06-15 10:05:00') === 0, 'Never mode must not send reminders');
+			continue;
+		}
+		$expectedDue = date('Y-m-d H:i:s', strtotime('2026-06-15 09:05:00') + $interval);
+		assert_true(is_array($state) && $state['repeat_mode'] === $mode && (int)$state['alert_count'] === 0 && $state['next_due_at'] === $expectedDue, $mode . ' mode should retain its expected first due time');
+		assert_true($runQueueAndCountEmails($queue, $watch, $expectedDue) === 1, $mode . ' mode should send its first reminder at the due time');
+		$afterReminder = $database->query("SELECT alert_count, next_due_at FROM registrationwatch_alert_escalation WHERE registration_id = {$registrationId}")->fetch(PDO::FETCH_ASSOC);
+		$nextInterval = $mode === 'escalating' ? 300 : $interval;
+		assert_true((int)$afterReminder['alert_count'] === 1 && $afterReminder['next_due_at'] === date('Y-m-d H:i:s', strtotime($expectedDue) + $nextInterval), $mode . ' mode should advance its counter and next due time once');
+	}
+});
+
+$runConfirmedRepeatRegression('per-extension repeat override with debounce', function () use ($makeQueueFixture, $insertQueueRegistration, $insertQueueTransition, $runQueueAndCountEmails, $setQueueLiveStatus): void {
+	[$database, $watch, $queue] = $makeQueueFixture(300, 0);
+	$database->prepare("UPDATE registrationwatch_settings SET setting_value = 'hourly' WHERE setting_key = 'repeat_mode'")->execute();
+	[$registrationId, $registrationKey] = $insertQueueRegistration($database, 'repeat-extension-override', 'Reachable', '5m', '192.0.2.120');
+	$setQueueLiveStatus($watch, 'repeat-extension-override', '192.0.2.120', 'Unreachable');
+	$insertQueueTransition($database, $registrationId, $registrationKey, 'repeat-extension-override', 'Reachable', 'Unreachable', '2026-06-15 09:00:00');
+	assert_true($runQueueAndCountEmails($queue, $watch, '2026-06-15 09:05:00') === 1, 'per-extension override should preserve the debounced initial alert');
+	$state = $database->query("SELECT repeat_mode, next_due_at FROM registrationwatch_alert_escalation WHERE registration_id = {$registrationId}")->fetch(PDO::FETCH_ASSOC);
+	assert_true(is_array($state) && $state['repeat_mode'] === '5m' && $state['next_due_at'] === '2026-06-15 09:10:00', 'per-extension 5m override should take precedence over the global hourly mode');
+	assert_true($runQueueAndCountEmails($queue, $watch, '2026-06-15 09:10:00') === 1, 'per-extension 5m override should deliver the first reminder');
+});
+
+$runConfirmedRepeatRegression('failed repeat retains existing counter policy', function () use ($makeQueueFixture, $insertQueueRegistration, $insertQueueTransition, $runQueueAndCountEmails, $setQueueLiveStatus): void {
+	[$database, $watch, $queue] = $makeQueueFixture(300, 0);
+	[$registrationId, $registrationKey] = $insertQueueRegistration($database, 'repeat-failed-delivery', 'Reachable', '5m', '192.0.2.121');
+	$setQueueLiveStatus($watch, 'repeat-failed-delivery', '192.0.2.121', 'Unreachable');
+	$insertQueueTransition($database, $registrationId, $registrationKey, 'repeat-failed-delivery', 'Reachable', 'Unreachable', '2026-06-15 09:00:00');
+	CI_Email::$sendResults = [true, false, true];
+	assert_true($runQueueAndCountEmails($queue, $watch, '2026-06-15 09:05:00') === 1, 'initial problem email should be attempted');
+	assert_true($runQueueAndCountEmails($queue, $watch, '2026-06-15 09:10:00') === 1, 'failed repeat email should be attempted once');
+	$failed = $database->query("SELECT result FROM registrationwatch_alert_history WHERE registration_id = {$registrationId} AND reminder_n = 1")->fetchColumn();
+	$state = $database->query("SELECT alert_count, next_due_at FROM registrationwatch_alert_escalation WHERE registration_id = {$registrationId}")->fetch(PDO::FETCH_ASSOC);
+	assert_true($failed === 'failed' && (int)$state['alert_count'] === 1 && $state['next_due_at'] === '2026-06-15 09:15:00', 'failed repeat should be recorded and consume one reminder number under existing policy');
+	assert_true($runQueueAndCountEmails($queue, $watch, '2026-06-15 09:15:00') === 1, 'following repeat should proceed after a failed repeat');
+	$next = $database->query("SELECT result FROM registrationwatch_alert_history WHERE registration_id = {$registrationId} AND reminder_n = 2")->fetchColumn();
+	assert_true($next === 'sent', 'next reminder should retain sequential numbering after failure');
+});
+
+$runConfirmedRepeatRegression('snoozed repeats retain existing counter policy', function () use ($makeQueueFixture, $insertQueueRegistration, $insertQueueTransition, $runQueueAndCountEmails, $setQueueLiveStatus): void {
+	[$database, $watch, $queue] = $makeQueueFixture(300, 0, date('Y-m-d H:i:s', time() + 3600));
+	[$registrationId, $registrationKey] = $insertQueueRegistration($database, 'repeat-snoozed', 'Reachable', '5m', '192.0.2.122');
+	$setQueueLiveStatus($watch, 'repeat-snoozed', '192.0.2.122', 'Unreachable');
+	$insertQueueTransition($database, $registrationId, $registrationKey, 'repeat-snoozed', 'Reachable', 'Unreachable', '2026-06-15 09:00:00');
+	$runQueueAndCountEmails($queue, $watch, '2026-06-15 09:05:00');
+	$runQueueAndCountEmails($queue, $watch, '2026-06-15 09:10:00');
+	$database->prepare("UPDATE registrationwatch_settings SET setting_value = '' WHERE setting_key = 'monitoring_snoozed_until'")->execute();
+	assert_true($runQueueAndCountEmails($queue, $watch, '2026-06-15 09:15:00') === 1, 'unsnoozed later reminder should be attempted');
+	$history = $database->query("SELECT reminder_n, result FROM registrationwatch_alert_history WHERE registration_id = {$registrationId} ORDER BY reminder_n")->fetchAll(PDO::FETCH_ASSOC);
+	assert_true(array_map('intval', array_column($history, 'reminder_n')) === [0, 1, 2] && array_column($history, 'result') === ['suppressed', 'suppressed', 'sent'], 'snoozed cycles should remain audited and continue numbering under existing policy');
+	$state = $database->query("SELECT alert_count, next_due_at FROM registrationwatch_alert_escalation WHERE registration_id = {$registrationId}")->fetch(PDO::FETCH_ASSOC);
+	assert_true((int)$state['alert_count'] === 2 && $state['next_due_at'] === '2026-06-15 09:20:00', 'snoozed reminders should advance the existing schedule policy');
+});
+
+$runConfirmedRepeatRegression('Storm Summary repeats authorize recovery', function () use ($makeQueueFixture, $insertQueueRegistration, $insertQueueTransition, $runQueueAndCountEmails, $setQueueLiveStatus): void {
+	[$database, $watch, $queue] = $makeQueueFixture(300, 1);
+	[$registrationId, $registrationKey] = $insertQueueRegistration($database, 'repeat-storm-summary', 'Reachable', '5m', '192.0.2.123');
+	$setQueueLiveStatus($watch, 'repeat-storm-summary', '192.0.2.123', 'Unreachable');
+	$insertQueueTransition($database, $registrationId, $registrationKey, 'repeat-storm-summary', 'Reachable', 'Unreachable', '2026-06-15 09:00:00');
+	assert_true($runQueueAndCountEmails($queue, $watch, '2026-06-15 09:05:00') === 1, 'initial problem should be delivered through Storm Summary');
+	assert_true($runQueueAndCountEmails($queue, $watch, '2026-06-15 09:10:00') === 1, 'repeat should be delivered through Storm Summary');
+	$repeatResult = $database->query("SELECT result FROM registrationwatch_alert_history WHERE registration_id = {$registrationId} AND reminder_n = 1")->fetchColumn();
+	assert_true($repeatResult === 'storm_suppressed', 'successful repeat Storm Summary should count as successful notification coverage');
+	$insertQueueTransition($database, $registrationId, $registrationKey, 'repeat-storm-summary', 'Unreachable', 'Reachable', '2026-06-15 09:12:00');
+	$setQueueLiveStatus($watch, 'repeat-storm-summary', '192.0.2.123', 'Reachable');
+	assert_true($runQueueAndCountEmails($queue, $watch, '2026-06-15 09:12:00') === 1, 'successful repeat summary should authorize recovery coverage');
+	$recoveryResult = $database->query("SELECT result FROM registrationwatch_alert_history WHERE registration_id = {$registrationId} AND alert_type = 'recovery'")->fetchColumn();
+	assert_true($recoveryResult === 'storm_suppressed', 'recovery should continue using the existing Storm Summary behavior');
+	assert_true((int)$database->query("SELECT COUNT(*) FROM registrationwatch_alert_history WHERE registration_id = {$registrationId} AND alert_type = 'recovery' AND result = 'suppressed'")->fetchColumn() === 0, 'successful repeat Storm Summary coverage must not create a suppressed recovery decision');
+});
+
+$runConfirmedRepeatRegression('recovery cleanup is incident-scoped', function () use ($makeQueueFixture, $insertQueueRegistration, $insertQueueTransition, $runQueue): void {
+	[$database, $watch, $queue] = $makeQueueFixture(0, 0);
+	[$registrationId, $registrationKey] = $insertQueueRegistration($database, 'repeat-recovery-cleanup', 'Unreachable', 'hourly', '192.0.2.124');
+	$oldProblemId = $insertQueueTransition($database, $registrationId, $registrationKey, 'repeat-recovery-cleanup', 'Reachable', 'Unreachable', '2026-06-15 09:00:00');
+	$insertQueueTransition($database, $registrationId, $registrationKey, 'repeat-recovery-cleanup', 'Unreachable', 'Not registered', '2026-06-15 09:01:00');
+	$recoveryId = $insertQueueTransition($database, $registrationId, $registrationKey, 'repeat-recovery-cleanup', 'Not registered', 'Reachable', '2026-06-15 09:02:00');
+	$newProblemId = $insertQueueTransition($database, $registrationId, $registrationKey, 'repeat-recovery-cleanup', 'Reachable', 'Not registered', '2026-06-15 09:03:00');
+	$insertEscalation = $database->prepare('INSERT INTO registrationwatch_alert_escalation (registration_id, registration_key, extension, history_id, alert_type, active_since, last_alert_at, alert_count, next_due_at, repeat_mode) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+	$insertEscalation->execute([$registrationId, $registrationKey, 'repeat-recovery-cleanup', $oldProblemId, 'unreachable', '2026-06-15 09:00:00', '2026-06-15 09:01:00', 2, '2026-06-15 10:01:00', 'hourly']);
+	$insertEscalation->execute([$registrationId, $registrationKey, 'repeat-recovery-cleanup', $newProblemId, 'not_registered', '2026-06-15 09:03:00', '2026-06-15 09:03:00', 4, '2026-06-15 10:03:00', 'hourly']);
+	$database->exec("UPDATE registrationwatch_settings SET setting_value = '0' WHERE setting_key = 'alert_enabled'");
+	$runQueue($queue, $watch, '2026-06-15 09:04:00');
+	$state = $database->query("SELECT history_id, active_since, last_alert_at, alert_count, next_due_at FROM registrationwatch_alert_escalation WHERE registration_id = {$registrationId}")->fetch(PDO::FETCH_ASSOC);
+	assert_true($recoveryId > $oldProblemId && is_array($state) && (int)$state['history_id'] === $newProblemId, 'recovery should remove mismatched old state but preserve the newer incident schedule');
+	assert_true($state['active_since'] === '2026-06-15 09:03:00' && $state['last_alert_at'] === '2026-06-15 09:03:00' && (int)$state['alert_count'] === 4 && $state['next_due_at'] === '2026-06-15 10:03:00', 'newer incident schedule fields must remain unchanged by older recovery replay');
+});
+
+$runConfirmedRepeatRegression('Sam 247020 Unknown handoff timeline', function () use ($makeQueueFixture, $insertQueueRegistration, $insertQueueTransition, $runQueueAndCountEmails, $setQueueLiveStatus): void {
+	[$database, $watch, $queue] = $makeQueueFixture(180, 0);
+	$database->prepare("UPDATE registrationwatch_settings SET setting_value = '5m' WHERE setting_key = 'repeat_mode'")->execute();
+	[$registrationId, $registrationKey] = $insertQueueRegistration($database, '247020', 'Reachable', '', '192.0.2.247');
+	$setQueueLiveStatus($watch, '247020', '192.0.2.247', 'Unreachable');
+	$insertQueueTransition($database, $registrationId, $registrationKey, '247020', 'Reachable', 'Unreachable', '2026-06-15 18:29:11');
+	assert_true($runQueueAndCountEmails($queue, $watch, '2026-06-15 18:32:11') === 1, 'Sam timeline should send its initial Unreachable notification at debounce expiry');
+	$insertQueueTransition($database, $registrationId, $registrationKey, '247020', 'Unreachable', 'Unknown', '2026-06-15 18:32:32');
+	$setQueueLiveStatus($watch, '247020', '192.0.2.247', 'Unknown');
+	assert_true($runQueueAndCountEmails($queue, $watch, '2026-06-15 18:32:32') === 0, 'intermediate Unknown must not send a problem or recovery notification');
+	$insertQueueTransition($database, $registrationId, $registrationKey, '247020', 'Unknown', 'Not registered', '2026-06-15 18:32:51');
+	$setQueueLiveStatus($watch, '247020', '192.0.2.247', 'Not registered');
+	assert_true($runQueueAndCountEmails($queue, $watch, '2026-06-15 18:32:51') === 0, 'Unknown to Not registered must not duplicate the initial notification');
+	foreach (['2026-06-15 18:37:11', '2026-06-15 18:42:11', '2026-06-15 18:47:11', '2026-06-15 18:52:11', '2026-06-15 18:57:11'] as $dueAt) {
+		assert_true($runQueueAndCountEmails($queue, $watch, $dueAt) === 1, 'Sam timeline should deliver a repeat while still unhealthy at ' . $dueAt);
+	}
+	$insertQueueTransition($database, $registrationId, $registrationKey, '247020', 'Not registered', 'Reachable', '2026-06-15 18:59:20');
+	$setQueueLiveStatus($watch, '247020', '192.0.2.247', 'Reachable');
+	$recoveryEmailDelta = $runQueueAndCountEmails($queue, $watch, '2026-06-15 18:59:20');
+	$problemHistory = $database->query("SELECT history_id, alert_type, status, reminder_n, result FROM registrationwatch_alert_history WHERE registration_id = {$registrationId} AND alert_type IN ('unreachable', 'not_registered') ORDER BY sent_at, id")->fetchAll(PDO::FETCH_ASSOC);
+	$recoveryHistory = $database->query("SELECT result FROM registrationwatch_alert_history WHERE registration_id = {$registrationId} AND alert_type = 'recovery'")->fetchColumn();
+	$escalationCount = (int)$database->query("SELECT COUNT(*) FROM registrationwatch_alert_escalation WHERE registration_id = {$registrationId}")->fetchColumn();
+	assert_true($recoveryEmailDelta === 1 && $recoveryHistory === 'sent', 'Sam timeline should send recovery after successfully delivered repeats; got ' . json_encode([$recoveryEmailDelta, $recoveryHistory, $problemHistory, $escalationCount]));
+	assert_true(count($problemHistory) === 6 && array_map('intval', array_column($problemHistory, 'reminder_n')) === [0, 1, 2, 3, 4, 5], 'Sam timeline should preserve one initial alert and five sequential repeats');
+	assert_true($escalationCount === 0, 'Sam timeline recovery should cancel the active escalation');
+});
+
+$runConfirmedRepeatRegression('Unknown at due time defers repeat', function () use ($makeQueueFixture, $insertQueueRegistration, $insertQueueTransition, $runQueueAndCountEmails, $setQueueLiveStatus): void {
+	[$database, $watch, $queue] = $makeQueueFixture(180, 0);
+	$database->prepare("UPDATE registrationwatch_settings SET setting_value = '5m' WHERE setting_key = 'repeat_mode'")->execute();
+	[$registrationId, $registrationKey] = $insertQueueRegistration($database, 'repeat-unknown-at-due', 'Reachable', '', '192.0.2.248');
+	$setQueueLiveStatus($watch, 'repeat-unknown-at-due', '192.0.2.248', 'Unreachable');
+	$insertQueueTransition($database, $registrationId, $registrationKey, 'repeat-unknown-at-due', 'Reachable', 'Unreachable', '2026-06-15 09:00:00');
+	assert_true($runQueueAndCountEmails($queue, $watch, '2026-06-15 09:03:00') === 1, 'Unknown due-time regression should establish the initial alert');
+	$insertQueueTransition($database, $registrationId, $registrationKey, 'repeat-unknown-at-due', 'Unreachable', 'Unknown', '2026-06-15 09:04:00');
+	$setQueueLiveStatus($watch, 'repeat-unknown-at-due', '192.0.2.248', 'Unknown');
+	$runQueueAndCountEmails($queue, $watch, '2026-06-15 09:04:00');
+	$stateBeforeDue = $database->query("SELECT active_since, last_alert_at, alert_count, next_due_at FROM registrationwatch_alert_escalation WHERE registration_id = {$registrationId}")->fetch(PDO::FETCH_ASSOC);
+	assert_true($runQueueAndCountEmails($queue, $watch, '2026-06-15 09:08:00') === 0, 'Unknown live state should defer, not send, the due repeat');
+	$stateAtDue = $database->query("SELECT active_since, last_alert_at, alert_count, next_due_at FROM registrationwatch_alert_escalation WHERE registration_id = {$registrationId}")->fetch(PDO::FETCH_ASSOC);
+	assert_true(is_array($stateAtDue) && $stateAtDue === $stateBeforeDue, 'Unknown live state should preserve the due repeat schedule unchanged');
+	$insertQueueTransition($database, $registrationId, $registrationKey, 'repeat-unknown-at-due', 'Unknown', 'Not registered', '2026-06-15 09:09:00');
+	$setQueueLiveStatus($watch, 'repeat-unknown-at-due', '192.0.2.248', 'Not registered');
+	assert_true($runQueueAndCountEmails($queue, $watch, '2026-06-15 09:09:00') === 1, 'returning to a known unhealthy state should deliver the still-due repeat once');
+	$history = $database->query("SELECT reminder_n, alert_type, status FROM registrationwatch_alert_history WHERE registration_id = {$registrationId} ORDER BY id")->fetchAll(PDO::FETCH_ASSOC);
+	assert_true(array_map('intval', array_column($history, 'reminder_n')) === [0, 1] && $history[1]['alert_type'] === 'not_registered' && $history[1]['status'] === 'Not registered', 'deferred reminder should retain its number and follow the known current unhealthy state');
+});
+
+$runConfirmedRepeatRegression('Unknown to Reachable authorizes recovery', function () use ($makeQueueFixture, $insertQueueRegistration, $insertQueueTransition, $runQueueAndCountEmails, $setQueueLiveStatus): void {
+	[$database, $watch, $queue] = $makeQueueFixture(180, 0);
+	$database->prepare("UPDATE registrationwatch_settings SET setting_value = '5m' WHERE setting_key = 'repeat_mode'")->execute();
+	[$registrationId, $registrationKey] = $insertQueueRegistration($database, 'repeat-unknown-direct-recovery', 'Reachable', '', '192.0.2.252');
+	$setQueueLiveStatus($watch, 'repeat-unknown-direct-recovery', '192.0.2.252', 'Unreachable');
+	$insertQueueTransition($database, $registrationId, $registrationKey, 'repeat-unknown-direct-recovery', 'Reachable', 'Unreachable', '2026-06-15 09:00:00');
+	assert_true($runQueueAndCountEmails($queue, $watch, '2026-06-15 09:03:00') === 1, 'direct recovery regression should send the initial problem notification');
+	$insertQueueTransition($database, $registrationId, $registrationKey, 'repeat-unknown-direct-recovery', 'Unreachable', 'Unknown', '2026-06-15 09:04:00');
+	$setQueueLiveStatus($watch, 'repeat-unknown-direct-recovery', '192.0.2.252', 'Unknown');
+	assert_true($runQueueAndCountEmails($queue, $watch, '2026-06-15 09:04:00') === 0, 'transition to Unknown must not generate a notification');
+	$insertQueueTransition($database, $registrationId, $registrationKey, 'repeat-unknown-direct-recovery', 'Unknown', 'Reachable', '2026-06-15 09:05:00');
+	$setQueueLiveStatus($watch, 'repeat-unknown-direct-recovery', '192.0.2.252', 'Reachable');
+	assert_true($runQueueAndCountEmails($queue, $watch, '2026-06-15 09:05:00') === 1, 'successful problem notification followed by Unknown to Reachable should send one recovery email');
+	$recoveryHistory = $database->query("SELECT result FROM registrationwatch_alert_history WHERE registration_id = {$registrationId} AND alert_type = 'recovery'")->fetchColumn();
+	assert_true($recoveryHistory === 'sent' && (int)$database->query("SELECT COUNT(*) FROM registrationwatch_alert_escalation WHERE registration_id = {$registrationId}")->fetchColumn() === 0, 'direct recovery should be recorded and clear the escalation');
+});
+
+$runConfirmedRepeatRegression('stale replay respects completed incident boundary', function () use ($makeQueueFixture, $insertQueueRegistration, $insertQueueTransition, $runQueueAndCountEmails, $setQueueLiveStatus): void {
+	[$database, $watch, $queue] = $makeQueueFixture(180, 0);
+	[$registrationId, $registrationKey] = $insertQueueRegistration($database, 'repeat-stale-incident-boundary', 'Reachable', '5m', '192.0.2.249');
+	$setQueueLiveStatus($watch, 'repeat-stale-incident-boundary', '192.0.2.249', 'Unreachable');
+	$insertQueueTransition($database, $registrationId, $registrationKey, 'repeat-stale-incident-boundary', 'Reachable', 'Unreachable', '2026-06-15 09:00:00');
+	assert_true($runQueueAndCountEmails($queue, $watch, '2026-06-15 09:03:00') === 1, 'first incident should send its initial alert at debounce expiry');
+	$insertQueueTransition($database, $registrationId, $registrationKey, 'repeat-stale-incident-boundary', 'Unreachable', 'Reachable', '2026-06-15 09:10:00');
+	$setQueueLiveStatus($watch, 'repeat-stale-incident-boundary', '192.0.2.249', 'Reachable');
+	assert_true($runQueueAndCountEmails($queue, $watch, '2026-06-15 09:10:00') === 1, 'first incident should send its recovery');
+	$insertQueueTransition($database, $registrationId, $registrationKey, 'repeat-stale-incident-boundary', 'Reachable', 'Unknown', '2026-06-15 09:20:00');
+	$setQueueLiveStatus($watch, 'repeat-stale-incident-boundary', '192.0.2.249', 'Unknown');
+	assert_true($runQueueAndCountEmails($queue, $watch, '2026-06-15 09:20:00') === 0, 'new Unknown baseline should not send an alert');
+	$insertQueueTransition($database, $registrationId, $registrationKey, 'repeat-stale-incident-boundary', 'Unknown', 'Not registered', '2026-06-15 09:30:00');
+	$setQueueLiveStatus($watch, 'repeat-stale-incident-boundary', '192.0.2.249', 'Not registered');
+	assert_true($runQueueAndCountEmails($queue, $watch, '2026-06-15 09:30:00') === 0, 'Unknown-origin outage should remain unalerted');
+	$insertQueueTransition($database, $registrationId, $registrationKey, 'repeat-stale-incident-boundary', 'Not registered', 'Reachable', '2026-06-15 10:00:00');
+	$setQueueLiveStatus($watch, 'repeat-stale-incident-boundary', '192.0.2.249', 'Reachable');
+	$lateRecoveryEmailDelta = $runQueueAndCountEmails($queue, $watch, '2026-06-15 10:00:00');
+	$recoveryCount = (int)$database->query("SELECT COUNT(*) FROM registrationwatch_alert_history WHERE registration_id = {$registrationId} AND alert_type = 'recovery'")->fetchColumn();
+	assert_true($lateRecoveryEmailDelta === 0 && $recoveryCount === 1 && count(CI_Email::$sentMessages) === 2, 'completed 09:10 recovery must not authorize a second recovery for the independent Unknown-origin outage');
+});
+
+$runConfirmedRepeatRegression('matching older escalation loses to newer due incident', function () use ($makeQueueFixture, $insertQueueRegistration, $runQueueAndCountEmails, $setQueueLiveStatus): void {
+	[$database, $watch, $queue] = $makeQueueFixture(300, 0);
+	[$registrationId, $registrationKey] = $insertQueueRegistration($database, 'repeat-conflict-matching-both-due', 'Not registered', '5m', '192.0.2.250');
+	$setQueueLiveStatus($watch, 'repeat-conflict-matching-both-due', '192.0.2.250', 'Not registered');
+	$insertEscalation = $database->prepare('INSERT INTO registrationwatch_alert_escalation (registration_id, registration_key, extension, history_id, alert_type, active_since, last_alert_at, alert_count, next_due_at, repeat_mode) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+	$insertEscalation->execute([$registrationId, $registrationKey, 'repeat-conflict-matching-both-due', 1, 'not_registered', '2026-06-15 09:00:00', '2026-06-15 09:05:00', 0, '2026-06-15 09:10:00', '5m']);
+	$insertEscalation->execute([$registrationId, $registrationKey, 'repeat-conflict-matching-both-due', 2, 'unreachable', '2026-06-15 09:08:00', '2026-06-15 09:08:00', 0, '2026-06-15 09:10:00', '5m']);
+	$emailDelta = $runQueueAndCountEmails($queue, $watch, '2026-06-15 09:10:00');
+	$history = $database->query("SELECT history_id, alert_type, status, reminder_n FROM registrationwatch_alert_history WHERE registration_id = {$registrationId}")->fetchAll(PDO::FETCH_ASSOC);
+	$escalations = $database->query("SELECT history_id, alert_type, active_since, alert_count, next_due_at FROM registrationwatch_alert_escalation WHERE registration_id = {$registrationId}")->fetchAll(PDO::FETCH_ASSOC);
+	assert_true($emailDelta === 1 && count($history) === 1 && (int)$history[0]['history_id'] === 2 && $history[0]['alert_type'] === 'not_registered' && $history[0]['status'] === 'Not registered' && (int)$history[0]['reminder_n'] === 1, 'only the newer incident should emit a reminder when both conflicting rows are due; got ' . json_encode([$emailDelta, $history]));
+	assert_true(count($escalations) === 1 && (int)$escalations[0]['history_id'] === 2 && $escalations[0]['alert_type'] === 'not_registered' && $escalations[0]['active_since'] === '2026-06-15 09:08:00' && (int)$escalations[0]['alert_count'] === 1 && $escalations[0]['next_due_at'] === '2026-06-15 09:15:00', 'newer incident schedule should survive the both-due conflict');
+});
+
+$runConfirmedRepeatRegression('matching older escalation alone due is discarded', function () use ($makeQueueFixture, $insertQueueRegistration, $runQueueAndCountEmails, $setQueueLiveStatus): void {
+	[$database, $watch, $queue] = $makeQueueFixture(300, 0);
+	[$registrationId, $registrationKey] = $insertQueueRegistration($database, 'repeat-conflict-older-due', 'Not registered', '5m', '192.0.2.251');
+	$setQueueLiveStatus($watch, 'repeat-conflict-older-due', '192.0.2.251', 'Not registered');
+	$insertEscalation = $database->prepare('INSERT INTO registrationwatch_alert_escalation (registration_id, registration_key, extension, history_id, alert_type, active_since, last_alert_at, alert_count, next_due_at, repeat_mode) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+	$insertEscalation->execute([$registrationId, $registrationKey, 'repeat-conflict-older-due', 1, 'not_registered', '2026-06-15 09:00:00', '2026-06-15 09:05:00', 3, '2026-06-15 09:10:00', '5m']);
+	$insertEscalation->execute([$registrationId, $registrationKey, 'repeat-conflict-older-due', 2, 'unreachable', '2026-06-15 09:08:00', '2026-06-15 09:08:00', 4, '2026-06-15 09:15:00', '5m']);
+	$olderDueEmailDelta = $runQueueAndCountEmails($queue, $watch, '2026-06-15 09:10:00');
+	$afterOlderDue = $database->query("SELECT history_id, alert_type, active_since, last_alert_at, alert_count, next_due_at FROM registrationwatch_alert_escalation WHERE registration_id = {$registrationId}")->fetchAll(PDO::FETCH_ASSOC);
+	$historyAfterOlderDue = (int)$database->query("SELECT COUNT(*) FROM registrationwatch_alert_history WHERE registration_id = {$registrationId}")->fetchColumn();
+	assert_true($olderDueEmailDelta === 0 && $historyAfterOlderDue === 0 && count($afterOlderDue) === 1 && (int)$afterOlderDue[0]['history_id'] === 2 && $afterOlderDue[0]['alert_type'] === 'unreachable' && $afterOlderDue[0]['last_alert_at'] === '2026-06-15 09:08:00' && (int)$afterOlderDue[0]['alert_count'] === 4 && $afterOlderDue[0]['next_due_at'] === '2026-06-15 09:15:00', 'older matching escalation should be discarded without emitting or altering the newer schedule');
+	assert_true($runQueueAndCountEmails($queue, $watch, '2026-06-15 09:15:00') === 1, 'the newer incident should send exactly once when its own schedule becomes due');
+	$history = $database->query("SELECT history_id, alert_type, status, reminder_n FROM registrationwatch_alert_history WHERE registration_id = {$registrationId}")->fetchAll(PDO::FETCH_ASSOC);
+	assert_true(count($history) === 1 && (int)$history[0]['history_id'] === 2 && $history[0]['alert_type'] === 'not_registered' && $history[0]['status'] === 'Not registered' && (int)$history[0]['reminder_n'] === 5, 'the eventual reminder must belong only to the newer incident');
+});
+
+assert_true(!$confirmedRepeatFailures, implode("\n", $confirmedRepeatFailures));
 
 echo "repeat alerting contract tests passed\n";

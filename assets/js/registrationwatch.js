@@ -464,7 +464,7 @@
 					'<td data-label="Status">' + escapeHtml(displayLabel(entry.status)) + '</td>' +
 					'<td data-label="Recipient">' + escapeHtml(entry.recipient) + '</td>' +
 					'<td data-label="Result">' + escapeHtml(displayLabel(entry.result)) + '</td>' +
-					'<td data-label="Error">' + escapeHtml(entry.error) + '</td>' +
+					'<td data-label="Reason / Error">' + escapeHtml(entry.display_error !== undefined ? entry.display_error : entry.error) + '</td>' +
 					'<td data-label="Actions"><button type="button" class="btn btn-xs btn-danger rw-delete-alert-history" data-history-id="' + id + '" title="Delete Alert History row"><i class="fa fa-trash"></i></button></td>' +
 				'</tr>'
 			);
@@ -1592,8 +1592,11 @@
                         }
                 });
 
-                if (triggerMapChange && $('#rw-map-limit').length) {
-                        $('#rw-map-limit').val(currentLimit).trigger('change');
+                var mapLimit = document.getElementById('rw-map-limit');
+                if (triggerMapChange && mapLimit) {
+                        mapLimit.value = currentLimit;
+                        // The map renderer listens natively; jQuery trigger() does not dispatch native change events.
+                        mapLimit.dispatchEvent(new Event('change'));
                 }
         }
 

@@ -11,7 +11,7 @@ function compatibility_assert(bool $condition, string $message): void {
 $root = dirname(__DIR__);
 $moduleXml = simplexml_load_file($root . '/module.xml');
 compatibility_assert($moduleXml !== false, 'module.xml should parse');
-compatibility_assert((string)$moduleXml->version === '1.4.3', 'module version should be 1.4.3');
+compatibility_assert((string)$moduleXml->version === '1.4.4', 'module version should be 1.4.4');
 compatibility_assert((string)$moduleXml->depends->version === '16.0', 'minimum FreePBX version should be 16.0');
 $supportedVersions = [];
 foreach ($moduleXml->supported->version as $supportedVersion) {
