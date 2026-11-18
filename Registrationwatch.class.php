@@ -10,10 +10,12 @@
 
 namespace FreePBX\modules;
 
+require_once __DIR__ . '/Webhook.php';
+
 class Registrationwatch implements \BMO {
 
 	/** Fallback only. Authoritative version lives in module.xml. */
-	const VERSION = '1.4.4';
+	const VERSION = '1.5.0';
 
 	const STATUS_REACHABLE = 'Reachable';
 	const STATUS_UNREACHABLE = 'Unreachable';
@@ -247,12 +249,16 @@ class Registrationwatch implements \BMO {
 
 	public function showPage(): string {
 		$data = $this->getPageData(false);
+		$webhookPageData = $this->getWebhookPageData();
 
 		return load_view(__DIR__ . '/views/main.php', [
 			'moduleVersion' => $this->getVersion(),
 			'registrations' => $data['registrations'],
 			'statusHistory' => $data['statusHistory'],
 			'alertSettings' => $data['alertSettings'],
+			'webhookAuthorized' => $webhookPageData['webhookAuthorized'],
+			'webhookDestinations' => $webhookPageData['webhookDestinations'],
+			'webhookHistory' => $webhookPageData['webhookHistory'],
 			'pruneSettings' => $this->getPruneSettings(),
 			'alertHistory' => $data['alertHistory'],
 			'lastRefresh' => $data['lastRefresh'],
@@ -283,6 +289,9 @@ class Registrationwatch implements \BMO {
 			case 'resetextensionfromasterisk':
 			case 'snoozemonitoring':
 			case 'resumemonitoring':
+			case 'savewebhook':
+			case 'deletewebhook':
+			case 'testwebhook':
 				return true;
 		}
 
@@ -297,8 +306,10 @@ class Registrationwatch implements \BMO {
 			return ['status' => false, 'message' => _('Invalid security token. Please reload the page and try again.')];
 		}
 
-		// Access control relies on FreePBX authenticated admin context.
-		// See README TODO for granular ACL integration roadmap.
+		if (in_array($command, ['savewebhook', 'deletewebhook', 'testwebhook'], true)
+			&& !$this->isWebhookAdministrator()) {
+			return ['status' => false, 'message' => _('Full FreePBX administrator access is required for webhook management.')];
+		}
 
 		switch ($command) {
 			case 'refresh':
@@ -335,9 +346,46 @@ class Registrationwatch implements \BMO {
 				return $this->handleSnoozeMonitoring();
 			case 'resumemonitoring':
 				return $this->handleResumeMonitoring();
+			case 'savewebhook':
+				return $this->handleSaveWebhook();
+			case 'deletewebhook':
+				return $this->handleDeleteWebhook();
+			case 'testwebhook':
+				return $this->handleTestWebhook();
 		}
 
 		return ['status' => false, 'message' => _('Unknown command')];
+	}
+
+	private function isWebhookAdministrator(): bool {
+		if (!isset($_SESSION['AMP_user'])
+			|| !is_object($_SESSION['AMP_user'])
+			|| !method_exists($_SESSION['AMP_user'], 'checkSection')) {
+			return false;
+		}
+
+		try {
+			return $_SESSION['AMP_user']->checkSection('*') === true;
+		} catch (\Throwable $e) {
+			$this->logWarning('Webhook administrator authorization could not be verified; access denied.');
+			return false;
+		}
+	}
+
+	private function getWebhookPageData(): array {
+		if (!$this->isWebhookAdministrator()) {
+			return [
+				'webhookAuthorized' => false,
+				'webhookDestinations' => [],
+				'webhookHistory' => [],
+			];
+		}
+
+		return [
+			'webhookAuthorized' => true,
+			'webhookDestinations' => $this->getWebhookDestinationsForDisplay(),
+			'webhookHistory' => $this->getRecentWebhookDeliveries(),
+		];
 	}
 
 	private function handleGetHistory(): array {
@@ -947,6 +995,327 @@ class Registrationwatch implements \BMO {
 			'message' => $message,
 			'alertHistory' => $this->getAlertHistory(),
 		];
+	}
+
+	private function handleSaveWebhook(): array {
+		$id = isset($_REQUEST['destination_id']) ? trim((string)$_REQUEST['destination_id']) : '';
+		$name = isset($_REQUEST['name']) ? trim((string)$_REQUEST['name']) : '';
+		$url = isset($_REQUEST['url']) ? trim((string)$_REQUEST['url']) : '';
+		$method = isset($_REQUEST['method']) ? strtoupper(trim((string)$_REQUEST['method'])) : 'POST';
+		$enabled = !empty($_REQUEST['enabled']);
+		$allowPrivate = !empty($_REQUEST['allow_private']);
+		$template = isset($_REQUEST['payload_template']) ? trim((string)$_REQUEST['payload_template']) : '';
+
+		if ($name === '' || strlen($name) > 80) {
+			return ['status' => false, 'message' => _('Enter a destination name of 1 to 80 characters.')];
+		}
+		if (!in_array($method, ['POST', 'GET'], true)) {
+			return ['status' => false, 'message' => _('Choose POST or GET as the HTTP method.')];
+		}
+		$urlError = null;
+		if (RegistrationwatchWebhook::validateDestinationUrl($url, $allowPrivate, $urlError) === null) {
+			return ['status' => false, 'message' => _($urlError)];
+		}
+		if (strlen($template) > RegistrationwatchWebhook::MAX_PAYLOAD_BYTES) {
+			return ['status' => false, 'message' => _('The JSON payload template exceeds 8192 bytes.')];
+		}
+		if ($template !== '') {
+			preg_match_all('/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/', $template, $variables);
+			$allowedVariables = ['event', 'event_id', 'extension', 'technology', 'previous_status', 'current_status', 'timestamp', 'source', 'system_identifier', 'alert_type'];
+			foreach ($variables[1] as $variable) {
+				if (!in_array($variable, $allowedVariables, true)) {
+					return ['status' => false, 'message' => sprintf(_('Unknown payload variable: %s.'), $variable)];
+				}
+			}
+			$templateError = null;
+			$rendered = RegistrationwatchWebhook::renderPayload($template, [
+				'event' => 'registration.unregistered',
+				'event_id' => str_repeat('a', 64),
+				'extension' => '2001',
+				'technology' => 'PJSIP',
+				'previous_status' => self::STATUS_REACHABLE,
+				'current_status' => self::STATUS_NOT_REGISTERED,
+				'timestamp' => gmdate('c'),
+				'source' => 'Registration Watch',
+				'system_identifier' => $this->getSystemIdentifier(),
+				'alert_type' => 'not_registered',
+			], $templateError);
+			if ($rendered === null) {
+				return ['status' => false, 'message' => _($templateError)];
+			}
+		}
+
+		$destinations = $this->getWebhookDestinations();
+		$existing = null;
+		if ($id !== '') {
+			if (!preg_match('/^[a-f0-9]{32}$/', $id)) {
+				return ['status' => false, 'message' => _('Invalid webhook destination identifier.')];
+			}
+			foreach ($destinations as $destination) {
+				if ((string)$destination['id'] === $id) {
+					$existing = $destination;
+					break;
+				}
+			}
+			if ($existing === null) {
+				return ['status' => false, 'message' => _('The webhook destination no longer exists. Reload the page and try again.')];
+			}
+		} elseif (count($destinations) >= RegistrationwatchWebhook::MAX_DESTINATIONS) {
+			return ['status' => false, 'message' => _('A maximum of 20 webhook destinations is allowed.')];
+		} else {
+			try {
+				$id = bin2hex(random_bytes(16));
+			} catch (\Throwable $e) {
+				$this->logError('Unable to generate a webhook destination identifier.');
+				return ['status' => false, 'message' => _('Unable to create the webhook destination.')];
+			}
+		}
+
+		$headersEncrypted = (string)($existing['headers_encrypted'] ?? '');
+		$headersJson = isset($_REQUEST['custom_headers_json']) ? trim((string)$_REQUEST['custom_headers_json']) : '';
+		if (!empty($_REQUEST['clear_headers'])) {
+			$headersEncrypted = '';
+		} elseif ($headersJson !== '') {
+			$decodedHeaders = json_decode($headersJson, true);
+			if (!is_array($decodedHeaders) || json_last_error() !== JSON_ERROR_NONE || substr(ltrim($headersJson), 0, 1) !== '{') {
+				return ['status' => false, 'message' => _('Custom headers must be a valid JSON object of header names and values.')];
+			}
+			$headersError = null;
+			$headers = RegistrationwatchWebhook::validateHeaders($decodedHeaders, $headersError);
+			if ($headers === null) {
+				return ['status' => false, 'message' => _($headersError)];
+			}
+			$masterSecret = $this->getWebhookMasterSecret();
+			if ($headers && $masterSecret === '') {
+				return ['status' => false, 'message' => _('FreePBX database encryption settings are unavailable; custom authentication headers cannot be saved safely.')];
+			}
+			$headersEncrypted = $headers
+				? (RegistrationwatchWebhook::encryptHeaders($headers, $masterSecret) ?? '')
+				: '';
+			if ($headers && $headersEncrypted === '') {
+				return ['status' => false, 'message' => _('Unable to encrypt the custom authentication headers.')];
+			}
+		}
+
+		$record = [
+			'id' => $id,
+			'name' => $name,
+			'url' => $url,
+			'enabled' => $enabled ? 1 : 0,
+			'method' => $method,
+			'allow_private' => $allowPrivate ? 1 : 0,
+			'payload_template' => $template,
+			'headers_encrypted' => $headersEncrypted,
+		];
+		$replaced = false;
+		foreach ($destinations as $index => $destination) {
+			if ((string)$destination['id'] === $id) {
+				$destinations[$index] = $record;
+				$replaced = true;
+				break;
+			}
+		}
+		if (!$replaced) {
+			$destinations[] = $record;
+		}
+
+		$saveError = $this->saveWebhookDestinations($destinations);
+		if ($saveError !== null) {
+			return ['status' => false, 'message' => _($saveError)];
+		}
+		return [
+			'status' => true,
+			'message' => _('Webhook destination saved.'),
+			'webhookDestinations' => $this->getWebhookDestinationsForDisplay(),
+		];
+	}
+
+	private function handleDeleteWebhook(): array {
+		$id = isset($_REQUEST['destination_id']) ? trim((string)$_REQUEST['destination_id']) : '';
+		if (!preg_match('/^[a-f0-9]{32}$/', $id)) {
+			return ['status' => false, 'message' => _('Invalid webhook destination identifier.')];
+		}
+		$destinations = $this->getWebhookDestinations();
+		$remaining = array_values(array_filter($destinations, static function (array $destination) use ($id): bool {
+			return (string)($destination['id'] ?? '') !== $id;
+		}));
+		if (count($remaining) === count($destinations)) {
+			return ['status' => false, 'message' => _('The webhook destination no longer exists.')];
+		}
+
+		$saveError = $this->saveWebhookDestinations($remaining);
+		if ($saveError !== null) {
+			return ['status' => false, 'message' => _($saveError)];
+		}
+		$stmt = $this->db()->prepare(
+			"UPDATE registrationwatch_webhook_queue
+			SET status = 'suppressed', last_error = :error, updated_at = :updated_at
+			WHERE destination_id = :destination_id
+				AND status IN ('pending', 'processing')"
+		);
+		$stmt->execute([
+			':error' => 'Destination removed',
+			':updated_at' => $this->now(),
+			':destination_id' => $id,
+		]);
+		return [
+			'status' => true,
+			'message' => _('Webhook destination removed.'),
+			'webhookDestinations' => $this->getWebhookDestinationsForDisplay(),
+			'webhookHistory' => $this->getRecentWebhookDeliveries(),
+		];
+	}
+
+	private function handleTestWebhook(): array {
+		$id = isset($_REQUEST['destination_id']) ? trim((string)$_REQUEST['destination_id']) : '';
+		$destination = $this->getWebhookDestination($id);
+		if ($destination === null) {
+			return ['status' => false, 'message' => _('Select an existing webhook destination.')];
+		}
+		$destination = $this->prepareWebhookDestination($destination);
+		if (isset($destination['error'])) {
+			return ['status' => false, 'message' => $destination['error']];
+		}
+
+		try {
+			$eventId = hash('sha256', 'registrationwatch:test:' . bin2hex(random_bytes(16)));
+		} catch (\Throwable $e) {
+			$this->logError('Unable to generate a webhook test event identifier.');
+			return ['status' => false, 'message' => _('Unable to create the webhook test event.')];
+		}
+		$variables = [
+			'event' => 'registration.test',
+			'event_id' => $eventId,
+			'extension' => '',
+			'technology' => 'PJSIP',
+			'previous_status' => '',
+			'current_status' => '',
+			'timestamp' => gmdate('c'),
+			'source' => 'Registration Watch',
+			'system_identifier' => $this->getSystemIdentifier(),
+			'alert_type' => 'test',
+		];
+		$payloadError = null;
+		$payload = RegistrationwatchWebhook::renderPayload(
+			(string)($destination['payload_template'] ?? ''),
+			$variables,
+			$payloadError
+		);
+		if ($payload === null) {
+			return ['status' => false, 'message' => _($payloadError)];
+		}
+		$result = RegistrationwatchWebhook::deliver($destination, $payload);
+		$statusText = $result['http_status'] !== null
+			? sprintf(_('HTTP %d'), (int)$result['http_status'])
+			: (string)$result['error'];
+		return [
+			'status' => !empty($result['status']),
+			'message' => !empty($result['status'])
+				? sprintf(_('Test webhook accepted with %s.'), $statusText)
+				: sprintf(_('Test webhook failed: %s'), $statusText),
+			'http_status' => $result['http_status'],
+		];
+	}
+
+	private function getWebhookDestinations(): array {
+		$stmt = $this->db()->prepare('SELECT setting_value FROM registrationwatch_settings WHERE setting_key = :setting_key LIMIT 1');
+		$stmt->execute([':setting_key' => 'webhook_destinations']);
+		$raw = (string)($stmt->fetchColumn() ?? '');
+		if ($raw === '') {
+			return [];
+		}
+		$destinations = json_decode($raw, true);
+		if (!is_array($destinations) || json_last_error() !== JSON_ERROR_NONE) {
+			$this->logWarning('Stored webhook destination configuration is invalid JSON.');
+			return [];
+		}
+		return array_values(array_filter($destinations, static function ($destination): bool {
+			return is_array($destination)
+				&& preg_match('/^[a-f0-9]{32}$/', (string)($destination['id'] ?? ''))
+				&& isset($destination['url'], $destination['name']);
+		}));
+	}
+
+	private function saveWebhookDestinations(array $destinations): ?string {
+		$encoded = json_encode(array_values($destinations), JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+		if (!is_string($encoded)) {
+			return 'Unable to encode webhook destination configuration.';
+		}
+		if (strlen($encoded) > RegistrationwatchWebhook::MAX_DESTINATION_CONFIG_BYTES) {
+			return 'Webhook destination configuration exceeds the supported storage limit.';
+		}
+		$this->setSetting('webhook_destinations', $encoded);
+		return null;
+	}
+
+	private function getWebhookDestination(string $id): ?array {
+		if (!preg_match('/^[a-f0-9]{32}$/', $id)) {
+			return null;
+		}
+		foreach ($this->getWebhookDestinations() as $destination) {
+			if ((string)$destination['id'] === $id) {
+				return $destination;
+			}
+		}
+		return null;
+	}
+
+	private function getWebhookMasterSecret(): string {
+		return $this->getFreePBXConfigValue('AMPDBPASS');
+	}
+
+	private function prepareWebhookDestination(array $destination): array {
+		$encrypted = (string)($destination['headers_encrypted'] ?? '');
+		if ($encrypted === '') {
+			$destination['headers'] = [];
+			return $destination;
+		}
+		$headers = RegistrationwatchWebhook::decryptHeaders($encrypted, $this->getWebhookMasterSecret());
+		if ($headers === null) {
+			$this->logWarning('Unable to decrypt webhook authentication headers; re-save the destination credentials.');
+			return ['error' => _('Saved authentication headers cannot be decrypted. Re-enter them and save this destination.')];
+		}
+		$destination['headers'] = $headers;
+		return $destination;
+	}
+
+	private function getWebhookDestinationsForDisplay(): array {
+		$display = [];
+		foreach ($this->getWebhookDestinations() as $destination) {
+			$headers = [];
+			if (!empty($destination['headers_encrypted'])) {
+				$prepared = $this->prepareWebhookDestination($destination);
+				if (!isset($prepared['error'])) {
+					$headers = array_keys((array)($prepared['headers'] ?? []));
+				}
+			}
+			$display[] = [
+				'id' => (string)$destination['id'],
+				'name' => (string)$destination['name'],
+				'url' => (string)$destination['url'],
+				'method' => (string)($destination['method'] ?? 'POST'),
+				'enabled' => !empty($destination['enabled']),
+				'allow_private' => !empty($destination['allow_private']),
+				'payload_template' => (string)($destination['payload_template'] ?? ''),
+				'header_names' => $headers,
+				'has_custom_headers' => !empty($destination['headers_encrypted']),
+			];
+		}
+		return $display;
+	}
+
+	private function getRecentWebhookDeliveries(?string $destinationId = null): array {
+		$sql = 'SELECT destination_id, event_id, history_id, alert_type, event_type, status, attempts, http_status, last_error, last_attempt_at, created_at
+			FROM registrationwatch_webhook_queue';
+		$params = [];
+		if ($destinationId !== null && preg_match('/^[a-f0-9]{32}$/', $destinationId)) {
+			$sql .= ' WHERE destination_id = :destination_id';
+			$params[':destination_id'] = $destinationId;
+		}
+		$sql .= ' ORDER BY id DESC LIMIT 50';
+		$stmt = $this->db()->prepare($sql);
+		$stmt->execute($params);
+		return $stmt->fetchAll(\PDO::FETCH_ASSOC);
 	}
 
 	private function handleGetTopology(): array {
@@ -3297,6 +3666,12 @@ class Registrationwatch implements \BMO {
 		$settings = $this->getAlertSettings();
 		$recipients = $this->normaliseRecipients($settings['alert_recipients']);
 		$canSend = $settings['alert_enabled'] === '1' && (bool)$recipients;
+		$canSendWebhook = false;
+		try {
+			$canSendWebhook = $this->hasEnabledWebhookDestinations();
+		} catch (\Throwable $e) {
+			$this->logWarning('Webhook destinations could not be loaded; email notification processing will continue.');
+		}
 		$collectedAlerts = [];
 		$recoveryAuditCandidates = [];
 		$reminderCycles = [];
@@ -3437,6 +3812,7 @@ class Registrationwatch implements \BMO {
 									$settings,
 									$recipients,
 									$canSend,
+									$canSendWebhook,
 									$collectedAlerts,
 									$recoveryAuditCandidates
 								);
@@ -3458,6 +3834,7 @@ class Registrationwatch implements \BMO {
 							$settings,
 							$recipients,
 							$canSend,
+							$canSendWebhook,
 							$collectedAlerts,
 							$recoveryAuditCandidates
 						);
@@ -3474,6 +3851,324 @@ class Registrationwatch implements \BMO {
 		} catch (\Exception $e) {
 			$this->logError('Alert processing failed: ' . $e->getMessage());
 		}
+	}
+
+	private function hasEnabledWebhookDestinations(): bool {
+		foreach ($this->getWebhookDestinations() as $destination) {
+			if (!empty($destination['enabled'])) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private function queueWebhookEvent(array $transition, string $alertType, int $reminderN, int $incidentStartHistoryId): void {
+		try {
+			$historyId = (int)($transition['id'] ?? 0);
+			$registrationId = (int)($transition['registration_id'] ?? 0);
+			if ($historyId <= 0 || $registrationId <= 0) {
+				return;
+			}
+
+			$eventType = $alertType === 'recovery'
+				? 'registration.registered'
+				: ($alertType === 'not_registered' ? 'registration.unregistered' : 'registration.unreachable');
+			$eventId = hash('sha256', 'registrationwatch:' . $historyId . ':' . $alertType . ':' . $reminderN);
+			$timestamp = strtotime((string)($transition['created_at'] ?? ''));
+			$variables = [
+				'event' => $eventType,
+				'event_id' => $eventId,
+				'extension' => (string)($transition['extension'] ?? ''),
+				'technology' => 'PJSIP',
+				'previous_status' => $this->stateLabel($transition['from_state'] ?? ''),
+				'current_status' => $this->stateLabel($transition['to_state'] ?? ''),
+				'timestamp' => $timestamp === false ? gmdate('c') : gmdate('c', $timestamp),
+				'source' => 'Registration Watch',
+				'system_identifier' => $this->getSystemIdentifier(),
+				'alert_type' => $alertType,
+			];
+			$now = $this->now();
+			$snoozed = $this->isMonitoringSnoozed();
+			$db = $this->db();
+			$destinations = $this->getWebhookDestinations();
+			$queueCount = (int)$db->query('SELECT COUNT(*) FROM registrationwatch_webhook_queue')->fetchColumn();
+			if ($queueCount >= 10000) {
+				$db->exec("DELETE FROM registrationwatch_webhook_queue
+					WHERE status IN ('delivered', 'failed', 'suppressed')
+					ORDER BY id ASC LIMIT 1000");
+				$queueCount = (int)$db->query('SELECT COUNT(*) FROM registrationwatch_webhook_queue')->fetchColumn();
+			}
+			$pendingCount = (int)$db->query("SELECT COUNT(*) FROM registrationwatch_webhook_queue WHERE status IN ('pending', 'processing')")->fetchColumn();
+
+			foreach ($destinations as $destination) {
+				if (empty($destination['enabled'])) {
+					continue;
+				}
+				if ($alertType === 'recovery') {
+					$priorStmt = $db->prepare(
+						"SELECT status
+						FROM registrationwatch_webhook_queue
+						WHERE destination_id = :destination_id
+							AND registration_id = :registration_id
+							AND history_id >= :incident_start
+							AND history_id < :recovery_history
+							AND alert_type IN ('unreachable', 'not_registered')
+						ORDER BY id ASC"
+					);
+					$priorStmt->execute([
+						':destination_id' => (string)$destination['id'],
+						':registration_id' => $registrationId,
+						':incident_start' => max(0, $incidentStartHistoryId),
+						':recovery_history' => $historyId,
+					]);
+					$priorEvents = $priorStmt->fetchAll(\PDO::FETCH_COLUMN);
+					$problemQueued = false;
+					foreach ($priorEvents as $priorStatus) {
+						if (in_array((string)$priorStatus, ['pending', 'processing', 'delivered'], true)) {
+							$problemQueued = true;
+							break;
+						}
+					}
+					if (!$problemQueued) {
+						continue;
+					}
+				}
+
+				$payloadError = null;
+				$payload = RegistrationwatchWebhook::renderPayload(
+					(string)($destination['payload_template'] ?? ''),
+					$variables,
+					$payloadError
+				);
+				if ($payload === null) {
+					$this->logWarning('Webhook event was not queued because its configured payload is invalid.');
+					continue;
+				}
+				if ($pendingCount >= 5000 || $queueCount >= 10000) {
+					$this->logWarning('Webhook delivery queue is full; a notification event was not queued.');
+					continue;
+				}
+				$json = json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+				if (!is_string($json)) {
+					$this->logWarning('Webhook event payload could not be encoded.');
+					continue;
+				}
+				$stmt = $db->prepare(
+					'INSERT IGNORE INTO registrationwatch_webhook_queue
+						(destination_id, event_id, registration_id, history_id, incident_start_history_id, alert_type, event_type, payload,
+						 status, attempts, next_attempt_at, created_at, updated_at)
+					VALUES
+						(:destination_id, :event_id, :registration_id, :history_id, :incident_start_history_id, :alert_type, :event_type, :payload,
+						 :status, 0, :next_attempt_at, :created_at, :updated_at)'
+				);
+				$stmt->execute([
+					':destination_id' => (string)$destination['id'],
+					':event_id' => $eventId,
+					':registration_id' => $registrationId,
+					':history_id' => $historyId,
+					':incident_start_history_id' => max(0, $incidentStartHistoryId),
+					':alert_type' => $alertType,
+					':event_type' => $eventType,
+					':payload' => $json,
+					':status' => $snoozed ? 'suppressed' : 'pending',
+					':next_attempt_at' => $now,
+					':created_at' => $now,
+					':updated_at' => $now,
+				]);
+				if ($stmt->rowCount() > 0) {
+					$queueCount++;
+					if (!$snoozed) {
+						$pendingCount++;
+					}
+				}
+			}
+		} catch (\Throwable $e) {
+			$this->logWarning(
+				'Webhook event could not be queued (' . get_class($e) . ', code ' . (string)$e->getCode()
+				. '); registration monitoring and email notification processing will continue.'
+			);
+		}
+	}
+
+	private function getWebhookTransitionById(int $historyId): ?array {
+		if ($historyId <= 0) {
+			return null;
+		}
+		$stmt = $this->db()->prepare(
+			'SELECT id, registration_id, registration_key, extension, from_state, to_state, source, reason,
+				contact_uri, latency_ms, created_at
+			FROM registrationwatch_status_history
+			WHERE id = :id
+			LIMIT 1'
+		);
+		$stmt->execute([':id' => $historyId]);
+		$row = $stmt->fetch(\PDO::FETCH_ASSOC);
+		return is_array($row) ? $row : null;
+	}
+
+	private function processWebhookQueue(string $now, ?callable $resolver = null, ?callable $transport = null): void {
+		$db = null;
+		try {
+			$db = $this->db();
+			$staleProcessing = date('Y-m-d H:i:s', strtotime($now) - 600);
+			$lockClause = $db->getAttribute(\PDO::ATTR_DRIVER_NAME) === 'mysql' ? ' FOR UPDATE' : '';
+			$db->beginTransaction();
+			$stmt = $db->prepare(
+				"SELECT *
+				FROM registrationwatch_webhook_queue
+				WHERE (status = 'pending' AND next_attempt_at <= :now)
+					OR (status = 'processing' AND updated_at <= :stale_processing)
+				ORDER BY id ASC
+				LIMIT 1" . $lockClause
+			);
+			$stmt->execute([
+				':now' => $now,
+				':stale_processing' => $staleProcessing,
+			]);
+			$delivery = $stmt->fetch(\PDO::FETCH_ASSOC);
+			if (!is_array($delivery)) {
+				$db->commit();
+				$db->exec("DELETE FROM registrationwatch_webhook_queue
+					WHERE status IN ('delivered', 'failed', 'suppressed')
+						AND created_at < DATE_SUB(NOW(), INTERVAL 30 DAY)");
+				return;
+			}
+
+			$deliveryId = (int)$delivery['id'];
+			$storedAttempts = (int)$delivery['attempts'];
+			if ((string)$delivery['status'] === 'processing' && $storedAttempts >= 3) {
+				$this->updateWebhookDelivery(
+					$deliveryId,
+					'failed',
+					null,
+					'Delivery worker was interrupted after the maximum attempts.',
+					$now,
+					$storedAttempts
+				);
+				$db->commit();
+				return;
+			}
+			$attempts = $storedAttempts + 1;
+			$mark = $db->prepare(
+				"UPDATE registrationwatch_webhook_queue
+				SET status = 'processing', attempts = :attempts, last_attempt_at = :last_attempt_at, updated_at = :updated_at
+				WHERE id = :id"
+			);
+			$mark->execute([
+				':attempts' => $attempts,
+				':last_attempt_at' => $now,
+				':updated_at' => $now,
+				':id' => $deliveryId,
+			]);
+			$db->commit();
+
+			if ((string)$delivery['alert_type'] === 'recovery') {
+				$priorStmt = $db->prepare(
+					"SELECT status
+					FROM registrationwatch_webhook_queue
+					WHERE destination_id = :destination_id
+						AND registration_id = :registration_id
+						AND history_id >= :incident_start
+						AND history_id < :recovery_history
+						AND alert_type IN ('unreachable', 'not_registered')
+					ORDER BY id ASC"
+				);
+				$priorStmt->execute([
+					':destination_id' => (string)$delivery['destination_id'],
+					':registration_id' => (int)$delivery['registration_id'],
+					':incident_start' => (int)$delivery['incident_start_history_id'],
+					':recovery_history' => (int)$delivery['history_id'],
+				]);
+				$priorStatuses = $priorStmt->fetchAll(\PDO::FETCH_COLUMN);
+				$problemDelivered = in_array('delivered', $priorStatuses, true);
+				$problemPending = count(array_intersect(['pending', 'processing'], $priorStatuses)) > 0;
+				if (!$problemDelivered) {
+					if ($problemPending) {
+						$defer = $db->prepare(
+							"UPDATE registrationwatch_webhook_queue
+							SET status = 'pending', attempts = :attempts, next_attempt_at = :next_attempt_at, updated_at = :updated_at
+							WHERE id = :id"
+						);
+						$defer->execute([
+							':attempts' => max(0, $attempts - 1),
+							':next_attempt_at' => date('Y-m-d H:i:s', strtotime($now) + 60),
+							':updated_at' => $now,
+							':id' => $deliveryId,
+						]);
+						return;
+					}
+					$this->updateWebhookDelivery($deliveryId, 'suppressed', null, 'No successful problem notification was delivered.', $now, $attempts);
+					return;
+				}
+			}
+
+			$destination = $this->getWebhookDestination((string)$delivery['destination_id']);
+			if ($destination === null || empty($destination['enabled'])) {
+				$this->updateWebhookDelivery($deliveryId, 'suppressed', null, 'Destination disabled or removed.', $now, $attempts);
+				return;
+			}
+			$destination = $this->prepareWebhookDestination($destination);
+			if (isset($destination['error'])) {
+				$this->updateWebhookDelivery($deliveryId, 'failed', null, 'Saved authentication headers cannot be decrypted.', $now, $attempts);
+				return;
+			}
+			$payload = json_decode((string)$delivery['payload'], true);
+			if (!is_array($payload) || json_last_error() !== JSON_ERROR_NONE) {
+				$this->updateWebhookDelivery($deliveryId, 'failed', null, 'Stored notification payload is invalid.', $now, $attempts);
+				return;
+			}
+
+			if ($this->isMonitoringSnoozed()) {
+				$this->updateWebhookDelivery($deliveryId, 'suppressed', null, 'Monitoring is snoozed.', $now, $storedAttempts);
+				return;
+			}
+
+			$result = RegistrationwatchWebhook::deliver($destination, $payload, $resolver, $transport);
+			if (!empty($result['status'])) {
+				$this->updateWebhookDelivery($deliveryId, 'delivered', $result['http_status'], null, $now, $attempts);
+			} elseif (!empty($result['retryable']) && $attempts < 3) {
+				$delay = $attempts === 1 ? 60 : 300;
+				$this->updateWebhookDelivery(
+					$deliveryId,
+					'pending',
+					$result['http_status'],
+					(string)$result['error'],
+					date('Y-m-d H:i:s', strtotime($now) + $delay),
+					$attempts
+				);
+			} else {
+				$this->updateWebhookDelivery($deliveryId, 'failed', $result['http_status'], (string)$result['error'], $now, $attempts);
+			}
+		} catch (\Throwable $e) {
+			if ($db instanceof \PDO && $db->inTransaction()) {
+				try {
+					$db->rollBack();
+				} catch (\Throwable $rollbackError) {
+					$this->logError('Webhook delivery worker could not roll back its database transaction.');
+				}
+			}
+			$this->logWarning(
+				'Webhook delivery worker failed (' . get_class($e) . ', code ' . (string)$e->getCode()
+				. '); registration monitoring will continue.'
+			);
+		}
+	}
+
+	private function updateWebhookDelivery(int $id, string $status, ?int $httpStatus, ?string $error, string $updatedAt, int $attempts): void {
+		$stmt = $this->db()->prepare(
+			'UPDATE registrationwatch_webhook_queue
+			SET status = :status, http_status = :http_status, last_error = :last_error,
+				attempts = :attempts, updated_at = :updated_at
+			WHERE id = :id'
+		);
+		$stmt->execute([
+			':status' => $status,
+			':http_status' => $httpStatus,
+			':last_error' => $error === null ? null : substr($error, 0, 512),
+			':attempts' => $attempts,
+			':updated_at' => $updatedAt,
+			':id' => $id,
+		]);
 	}
 
 	private function alertTypeForTransition(array $transition, array $settings): ?string {
@@ -3784,6 +4479,28 @@ class Registrationwatch implements \BMO {
 			return;
 		}
 
+		try {
+			foreach ($alerts as $alert) {
+				if ((string)($alert['source'] ?? '') !== 'reminder') {
+					continue;
+				}
+				$transition = $this->getWebhookTransitionById((int)$alert['history_id']);
+				if ($transition === null) {
+					continue;
+				}
+				$transition['to_state'] = (string)$alert['status'];
+				$transition['reason'] = 'reminder';
+				$this->queueWebhookEvent(
+					$transition,
+					(string)$alert['alert_type'],
+					(int)($alert['reminder_n'] ?? 0),
+					(int)$alert['history_id']
+				);
+			}
+		} catch (\Throwable $e) {
+			$this->logWarning('Webhook reminder could not be queued; email notification processing will continue.');
+		}
+
 		$threshold = $this->stormThreshold($settings);
 		if ($threshold > 0 && count($alerts) >= $threshold) {
 			$summaryResults = [];
@@ -3945,7 +4662,7 @@ class Registrationwatch implements \BMO {
 		}
 	}
 
-	private function processAlertIncident(array $incident, ?array $recovery, int $debounceSeconds, string $staleCutoff, string $now, array $settings, array $recipients, bool $canSend, array &$collectedAlerts, array &$recoveryAuditCandidates): void {
+	private function processAlertIncident(array $incident, ?array $recovery, int $debounceSeconds, string $staleCutoff, string $now, array $settings, array $recipients, bool $canSend, bool $canSendWebhook, array &$collectedAlerts, array &$recoveryAuditCandidates): void {
 		$start = $incident['start'];
 		$problemTransitions = $incident['problem_transitions'] ?? [];
 		$problemTransition = $problemTransitions
@@ -3990,6 +4707,16 @@ class Registrationwatch implements \BMO {
 				$existingEscalation = $this->getActiveEscalationForRegistration($registrationId);
 				$this->deleteOtherEscalations($registrationId, (string)$problemAlertType);
 				$this->upsertEscalationForTransition($problemTransition, (string)$problemAlertType, $repeatMode, $now, $existingEscalation);
+			}
+
+			if ($canSendWebhook) {
+				$webhookTransitions = $debounceSeconds === 0 ? $problemTransitions : [$problemTransition];
+				foreach ($webhookTransitions as $transition) {
+					$alertType = $this->alertTypeForTransition($transition, $settings);
+					if ($this->isEscalatingAlertType((string)$alertType)) {
+						$this->queueWebhookEvent($transition, (string)$alertType, 0, $startId);
+					}
+				}
 			}
 
 			if ($canSend) {
@@ -4092,6 +4819,18 @@ class Registrationwatch implements \BMO {
 						$now
 					);
 				}
+			}
+		}
+
+		$recoveryTs = $recovery !== null ? strtotime((string)$recovery['created_at']) : false;
+		if ($canSendWebhook && $recovery !== null && $this->isRecoveryTransition($recovery)) {
+			$recoveryAlertType = $this->alertTypeForTransition($recovery, $settings);
+			if ($recoveryAlertType === 'recovery'
+				&& $recoveryTs !== false
+				&& $staleCutoffTs !== false
+				&& $recoveryTs >= $staleCutoffTs
+				&& ($nowTs === false || $recoveryTs <= $nowTs)) {
+				$this->queueWebhookEvent($recovery, 'recovery', 0, $startId);
 			}
 		}
 
@@ -5455,6 +6194,11 @@ class Registrationwatch implements \BMO {
 
 			return false;
 		}
+	}
+
+	public function runWebhookDeliveryWorker(): bool {
+		$this->processWebhookQueue($this->now());
+		return true;
 	}
 
 	private function getEmailStatus(): array {

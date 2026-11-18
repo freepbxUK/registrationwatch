@@ -149,6 +149,36 @@ body:has(.registrationwatch) #page_body {
 	margin-top: 16px;
 }
 
+.registrationwatch .rw-webhook-heading,
+.registrationwatch .rw-webhook-editor-actions {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 10px;
+	flex-wrap: wrap;
+}
+
+.registrationwatch .rw-webhook-url {
+	max-width: 420px;
+	overflow-wrap: anywhere;
+}
+
+.registrationwatch .rw-webhook-editor {
+	margin: 16px 0 24px;
+	padding: 16px;
+	border: 1px solid #ddd;
+	border-radius: 4px;
+	background: #fafafa;
+}
+
+.registrationwatch .rw-webhook-editor-actions {
+	justify-content: flex-start;
+}
+
+.registrationwatch .rw-webhook-history td {
+	overflow-wrap: anywhere;
+}
+
 .registrationwatch .rw-storm-threshold-group {
 	margin-top: 24px;
 }

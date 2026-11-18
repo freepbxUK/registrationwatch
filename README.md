@@ -1,4 +1,4 @@
-# Registration Watch 1.4.4 for FreePBX 16 and 17
+# Registration Watch 1.5.0 for FreePBX 16 and 17
 
 Registration Watch (`registrationwatch`) watches PJSIP registration state in
 FreePBX/PBXact 16 and 17. It discovers configured FreePBX PJSIP devices and tracks
@@ -7,7 +7,7 @@ alerts when watched registrations become unavailable or recover.
 
 **Signed Release**
 
-Registration Watch 1.4.1 was the first signed FreePBX UK release of the module. Releases are signed with the author's developer GPG key, which is signed by the FreePBX Module Signing v2 master key, allowing FreePBX to verify module authenticity and integrity.
+Registration Watch 1.4.1 was the first signed FreePBX UK release of the module. Signed releases use the established developer GPG identity, signed by the FreePBX Module Signing v2 master key. This 1.5.0 development checkout is not signed: its checked-in `module.sig` belongs to 1.4.4 and must not be used for a 1.5.0 package.
 
 Multiple registrations under the same extension may be tracked separately where
 Registration Watch can distinguish them from Asterisk/FreePBX contact data.
@@ -31,8 +31,11 @@ falls back to a sensible `unknown system` label instead of failing email deliver
 
 ## Release Status
 
-Registration Watch 1.4.4 is a signed release supporting FreePBX/PBXact 16 and
-17.
+The latest published signed stable release is 1.4.4. This source checkout is
+the unsigned 1.5.0 development candidate for the existing FreePBX/PBXact 16
+and 17 module targets; it is not a production release. A future 1.5.0
+production release requires a newly signed package containing the final files
+and publication of its release asset and update metadata.
 
 Use the `main` branch for stable releases. Development and release-candidate
 branches may contain incomplete or test-only changes.
@@ -41,15 +44,24 @@ branches may contain incomplete or test-only changes.
 
 Use with FreePBX/PBXact 16 or 17.
 
+The module metadata does not declare a separate PHP version range. The existing
+compatibility contract avoids PHP 8-only language constructs; local 1.5.0
+validation runs on PHP 8.3. Confirm compatibility on the PHP version supplied by
+the target FreePBX distribution before deployment.
+
 ## Requirements
 
 * FreePBX/PBXact 16 or 17
 * PJSIP channel driver
 * Existing FreePBX PJSIP extensions/devices
 * Asterisk Manager access available to FreePBX
-* FreePBX Job runner enabled for scheduled background checks
+* FreePBX Job runner enabled for the registration-monitor and webhook-delivery
+  jobs
 * FreePBX mail support configured if alert email delivery is required
 * Email "From:" Address set in Advanced Settings (alerts will not send without it)
+* PHP cURL extension for webhook HTTP delivery
+* PHP `hrtime()` for hostname-based webhook DNS resolution; without it,
+  hostname resolution fails closed
 
 Advanced Settings → Email "From:" Address supports either a bare address such
 as `asterisk@demodomain.name` or a display name and address such as
@@ -61,7 +73,12 @@ A bare address continues to use the existing sender name, falling back to
 ## Installing
 
 Registration Watch is a community module and is not currently listed in the
-FreePBX online module repository.
+FreePBX online module repository. The preferred production installation is the
+latest published, correctly signed `.tgz` uploaded through Module Admin. The
+published 1.4.4 package remains the stable release; the unsigned 1.5.0
+development candidate is for review and testing only. A future 1.5.0
+production package may be installed this way only after it has been signed and
+published.
 
 Do not use:
 
@@ -69,9 +86,25 @@ Do not use:
 fwconsole ma installlocal registrationwatch
 ```
 
-Use `fwconsole ma install registrationwatch` with one of the methods below.
+Use Module Admin's upload/install action for a `.tgz`. For directory-based
+installation methods, use `fwconsole ma install registrationwatch`.
 
-### Option 1: Install from an unpacked module directory
+### Option 1: Upload a `.tgz` in Module Admin
+
+In **Admin > Module Admin**, use the module upload/install control and select
+the latest published signed Registration Watch archive. Review the module
+identity, version, and signature status shown by Module Admin, then install it
+and run `fwconsole chown` and `fwconsole reload`. Use a signed
+`registrationwatch-1.5.0.tgz` only after the final 1.5.0 production package is
+published.
+
+The archive must contain a `registrationwatch/` directory at its root. The
+development candidate produced by the local packaging script is named
+`registrationwatch-1.5.0-unsigned.tgz`; it is for structural review and test
+installations only and does not contain a valid signature. Do not treat it as
+a production release or upload it to production systems.
+
+### Option 2: Install from an unpacked module directory
 
 Place the `registrationwatch` directory in `/var/www/html/admin/modules/`, then:
 
@@ -83,7 +116,7 @@ fwconsole chown
 fwconsole reload
 ```
 
-### Option 2: Install from GitHub
+### Option 3: Install from GitHub
 
 FreePBX 16 / PBXact 16 (CentOS 7)
 
@@ -127,7 +160,7 @@ fwconsole chown
 fwconsole reload
 ```
 
-### Option 3: Install from a local copy
+### Option 4: Install from a local copy
 
 Copy or symlink a local `registrationwatch` directory into
 `/var/www/html/admin/modules/`, then:
@@ -148,7 +181,21 @@ Do not uninstall when updating. Uninstalling removes Registration Watch tables,
 settings, watched registrations, status history, alert history, and
 repeat-alert state.
 
-### Option 1: Update from an unpacked module directory
+### Option 1: Update from a signed `.tgz`
+
+In **Admin > Module Admin**, upload the latest published signed
+Registration Watch archive (currently 1.4.4) and choose the normal module
+upgrade/install action. Do not uninstall the current module first. The unsigned
+1.5.0 development candidate is not a production upgrade package; use a signed
+`registrationwatch-1.5.0.tgz` only after the final 1.5.0 package is published.
+After Module Admin finishes, run `fwconsole chown` and `fwconsole reload`.
+
+The install hook uses additive `CREATE TABLE IF NOT EXISTS` statements and
+`INSERT IGNORE` defaults. It does not reset extension monitoring choices,
+settings, registration records, history, or escalation state. The webhook
+queue is added as a new table; existing registrations are not newly monitored.
+
+### Option 2: Update from an unpacked module directory
 
 Replace the module files in `/var/www/html/admin/modules/registrationwatch/`, then:
 
@@ -160,9 +207,13 @@ fwconsole chown
 fwconsole reload
 ```
 
-### Option 2: Update from GitHub
+### Option 3: Update from GitHub
 
 After the first installation, fwconsole chown may cause Git to reject the module directory because it is owned by the FreePBX web user rather than root. Run the following commands as root:
+
+**Warning:** `git reset --hard origin/main` discards uncommitted changes to
+tracked files in the module directory. Commit, back up, or otherwise preserve
+any local modifications before using this procedure.
 
 ```sh
 cd
@@ -179,7 +230,7 @@ fwconsole chown
 fwconsole reload
 ```
 
-### Option 3: Update from a local copy
+### Option 4: Update from a local copy
 
 Re-copy or re-link your local `registrationwatch` directory, then:
 
@@ -217,7 +268,225 @@ ambiguous. The documented procedure uses `git reset --hard origin/main` to avoid
 that ambiguity.
 
 Rerun the documented GitHub update and verify the version again. Do not proceed
-to signature troubleshooting until module.xml reports `1.4.4`.
+to signature troubleshooting until module.xml reports the version you intended
+to install.
+
+## Native update discovery
+
+Registration Watch configures the conventional module `<updateurl>` feed
+format. The expected JSON includes the module version and identity, package
+`location`, `md5sum`, and `packaged` timestamp. This format follows the
+[FreePBX third-party module hosting guide](https://sangomakb.atlassian.net/wiki/spaces/FP/pages/10584615/FreePBX+Open+Source+-+Third+Party+Module+Hosting),
+which documents `updateurl` support from Framework 13.0.191. The upstream
+[FreePBX 16](https://github.com/FreePBX/framework/blob/release/16.0/amp_conf/htdocs/admin/page.modules.php)
+and
+[FreePBX 17](https://github.com/FreePBX/framework/blob/release/17.0/amp_conf/htdocs/admin/page.modules.php)
+Module Admin sources both fetch HTTPS update URLs and decode the JSON metadata;
+their
+[download handlers for FreePBX 16](https://github.com/FreePBX/framework/blob/release/16.0/amp_conf/htdocs/admin/libraries/Console/Moduleadmin.class.php)
+and
+[FreePBX 17](https://github.com/FreePBX/framework/blob/release/17.0/amp_conf/htdocs/admin/libraries/Console/Moduleadmin.class.php)
+use the feed's `location` when downloading an update.
+
+The configured feed is
+`https://raw.githubusercontent.com/freepbxUK/registrationwatch/main/version.json`.
+No `version.json` is checked in for this unsigned development build, so it
+currently advertises no remote release. The release process must first publish
+the signed `registrationwatch-VERSION.tgz` asset at its versioned GitHub
+Release URL. Then run the metadata generator; it rebuilds and verifies the
+signed package, downloads the published asset over HTTPS, and confirms that
+the remote bytes exactly match the locally signed package before writing
+`version.json`. It rejects version regression and same-version package
+replacement. Only after these checks should the generated file be placed at
+the feed URL. This ordering avoids announcing an unavailable package.
+
+FreePBX discovers and presents updates through its native Module Admin
+interface and administrator-controlled update settings. This is update
+discovery only: Registration Watch does not schedule or execute independent
+automatic installations. The downloaded module still contains its signed
+`module.sig` and is subject to FreePBX signature verification.
+
+The `<updateurl>` declaration and JSON shape are verified against the
+third-party hosting guide and the upstream FreePBX 16 and 17 Framework source.
+Live Module Admin discovery and installation have not been tested on either
+FreePBX release, so validate those steps on supported PBX installations before
+publishing or deploying an update.
+
+## Building release archives
+
+The package builder stages an explicit production-file list under the required
+`registrationwatch/` archive directory. It excludes Git metadata, tests,
+packaging scripts, temporary files, and the checked-in 1.4.4 signature. Tar
+ownership, timestamps, file ordering, and gzip timestamps are normalized so
+repeated builds from identical files are byte-for-byte reproducible.
+
+Build an unsigned review package:
+
+```sh
+php scripts/package.php --unsigned --output-dir=dist
+```
+
+This creates `dist/registrationwatch-1.5.0-unsigned.tgz`. It is not a signed
+release and must not be published as production-ready. The script refuses
+signed mode unless `module.sig` verifies with the existing signer fingerprint
+and its signed per-file hashes match the complete production package list:
+
+```sh
+php scripts/package.php --signed --output-dir=dist
+```
+
+Before a signed build, the authorized signer must generate a new signature for
+the final 1.5.0 production files using the established FreePBX Module Signing
+v2 workflow and existing developer identity. Do not copy the 1.4.4 signature,
+generate replacement keys, or commit private signing material. The signed
+builder requires the existing public key in the local GPG keyring and fails
+closed if verification or manifest checks fail. The manually dispatched
+GitHub Actions workflow creates only a clearly named unsigned review artifact;
+it has no release or publication step.
+
+After publishing the signed package asset, generate the remote update metadata:
+
+```sh
+php scripts/update-metadata.php --output-dir=dist
+```
+
+The generator fails if signing credentials are missing, the published GitHub
+Release asset is unavailable or differs from the signed local package, or the
+new version regresses from the existing root `version.json`. It writes
+`dist/version.json` only after validation. Publish the release asset first;
+then review and place the generated `version.json` at the repository root so
+the configured feed starts advertising that available package. This command
+does not publish either artifact.
+
+## Webhooks
+
+The **Webhooks** section supports up to 20 independently enabled destinations.
+Each destination has a name, URL, POST or GET method, optional JSON payload
+template, optional custom headers, and an explicit private-network exception.
+POST with JSON is the default. GET places payload fields in the query string;
+use it only when the endpoint and its URL logs are suitable for those values.
+Credentials in URL user-info and common credential-style query parameter names
+are rejected. Because arbitrary parameter names cannot be identified as secrets,
+never put credentials in any URL parameter; use encrypted custom headers.
+The serialized destination list is capped at 8,000,000 bytes and stored in a
+`MEDIUMTEXT` settings column; configured per-field and destination-count limits
+fit below that cap.
+
+Webhooks use Registration Watch's existing reconciliation and alert-event
+pipeline. Only actively monitored registrations are eligible. Per-event alert
+preferences, debounce, snooze, and recovery rules are reused; a recovery is
+queued only when its corresponding problem event was queued for that
+destination. Webhook delivery is independent of whether email is enabled.
+Repeat reminder webhooks are generated when the existing reminder pipeline
+produces a reminder. Storm Threshold continues to batch email only; it does not
+collapse webhook events.
+
+Default POST JSON payload:
+
+```json
+{
+  "event": "registration.unregistered",
+  "event_id": "stable-sha256-event-identifier",
+  "extension": "2001",
+  "technology": "PJSIP",
+  "previous_status": "Reachable",
+  "current_status": "Not registered",
+  "timestamp": "2026-11-18T15:30:00+00:00",
+  "source": "Registration Watch",
+  "system_identifier": "PBX-01",
+  "alert_type": "not_registered"
+}
+```
+
+The available current registration states are `Reachable`, `Unreachable`,
+`Registered (no qualify)`, `Unknown`, and `Not registered`. Event names used by
+the notification pipeline include `registration.unreachable`,
+`registration.unregistered`, and `registration.registered`. The event ID is
+stable for the stored transition and alert/reminder type, and is shared across
+destinations. It can be used by receivers to deduplicate delivery retries.
+The payload does not include contact addresses, device IPs, user agents, or
+credentials.
+
+Custom payloads must be valid JSON objects. Use placeholders inside JSON string
+values, for example:
+
+```json
+{
+  "kind": "{{event}}",
+  "id": "{{event_id}}",
+  "extension": "{{extension}}",
+  "from": "{{previous_status}}",
+  "to": "{{current_status}}",
+  "time": "{{timestamp}}"
+}
+```
+
+Supported placeholders are `{{event}}`, `{{event_id}}`, `{{extension}}`,
+`{{technology}}`, `{{previous_status}}`, `{{current_status}}`, `{{timestamp}}`,
+`{{source}}`, `{{system_identifier}}`, and `{{alert_type}}`. Values are
+substituted as escaped JSON string content; templates are never evaluated as
+PHP or shell code. Unknown placeholders are rejected when saved, and absent
+values render as empty strings.
+
+### Authentication and destination security
+
+Use HTTPS for public integrations. TLS certificate verification is enabled,
+redirects and environment proxies are disabled, and the resolved destination
+address is validated and pinned for each request. Loopback, link-local,
+reserved, documentation, benchmarking, multicast, transition, and cloud
+metadata addresses are blocked. Only global-unicast public addresses are
+accepted by default. To use an internal service, explicitly enable the
+private-network exception; it permits RFC1918 IPv4 or ULA IPv6 addresses, but
+not carrier-grade NAT or other special-use ranges. HTTP is allowed only for
+such an explicitly enabled private destination. TLS verification remains
+enabled for internal HTTPS.
+
+Hostname resolution sends bounded DNS queries directly to numeric nameservers
+from `/etc/resolv.conf`; it does not call the system hostname resolver.
+IPv4 and IPv6 records are checked, and any unsafe answer rejects the whole
+destination. A monotonic two-second deadline covers DNS resolution, with at
+most one second per address family. cURL is configured to connect to the
+validated address; delivery fails closed if that pin cannot be configured.
+Hostname destinations fail closed on PHP runtimes without `hrtime()`.
+
+Custom header JSON may contain values such as an `Authorization` bearer token.
+Header values are stored as AES-256-GCM ciphertext using a key derived from the
+local FreePBX database credential, and are never returned to the GUI, logs, or
+delivery history. When editing, blank headers preserve saved values; selecting
+**Clear saved headers** removes them. After changing the database credential,
+or restoring the encrypted configuration onto a PBX with a different
+credential, re-enter custom headers. Keep FreePBX configuration and database
+backups protected.
+
+### Testing and delivery behavior
+
+The **Test** action sends a clearly marked `registration.test` event using the
+selected destination's saved settings. It does not enqueue a monitoring event
+or change registration state. A test succeeds only for an HTTP 2xx response;
+the interface reports the HTTP status or a sanitized connection/validation
+error. The request has a two-second connect timeout and five-second total
+timeout.
+
+Monitoring notifications enter a database queue and are sent by a separate
+FreePBX webhook-delivery job; the registration-monitor job only reconciles
+registrations and queues events. One queued delivery is attempted per webhook
+job run, with a two-second DNS resolution deadline, a five-second request
+timeout, a maximum of three attempts
+(initial attempt plus retries after 60 and 300 seconds), and no redirects.
+DNS resolution failures, transient connection errors, HTTP 408/429, and HTTP
+5xx are retried; other non-2xx responses fail. At most 5,000 deliveries can be
+pending/in progress,
+and the table is bounded at 10,000 rows by removing completed entries when
+needed. Old completed records are pruned after 30 days when the queue is idle.
+Recent status, attempts, HTTP status, and sanitized errors appear in the GUI.
+
+Delivery is at-least-once: if an endpoint processes an event but the PBX loses
+the response, a retry can deliver it again. A process interrupted during
+delivery is eligible for retry after a ten-minute processing lease expires.
+Stable event IDs are provided for receiver-side deduplication. A full queue
+drops new webhook notifications and records a warning; it never blocks the
+registration reconciliation or existing email delivery. The PHP cURL extension
+is required for HTTP delivery.
 
 #### `git fetch origin` cannot find a remote branch
 
@@ -381,28 +650,50 @@ For suspected security vulnerabilities, do not post exploit details publicly. Co
 
 ## Background Checks
 
-Registration Watch registers a FreePBX job named:
+Registration Watch registers two separate FreePBX jobs from its install hook.
+The hook runs on installation and upgrade and uses stable module/job
+identifiers, so repeating the install does not create a second logical job:
 
 ```text
 registrationwatch :: monitor
+registrationwatch :: webhooks
 ```
 
-Useful checks:
+`registrationwatch :: monitor` is implemented by
+`\FreePBX\modules\Registrationwatch\Job`. It reconciles registration status,
+records transitions, and queues eligible email and webhook notifications. It
+does not make webhook HTTP requests.
+
+`registrationwatch :: webhooks` is implemented by
+`\FreePBX\modules\Registrationwatch\WebhookJob`. It processes at most one
+queued webhook delivery per run, including retry scheduling and delivery
+history updates. Both jobs are scheduled once per minute by the FreePBX Job
+runner.
+
+Check that both jobs are registered:
 
 ```sh
 fwconsole job --list | grep -i registrationwatch
+```
+
+The list should contain both identifiers above. To run either job manually,
+use its actual job ID from that list:
+
+```text
 fwconsole job --run=<job_id> --force
 ```
 
-Expected job output includes:
-
-```text
-Running registrationwatch :: monitor ...
-Registration Watch background job completed.
-```
+If either job is missing, rerun the module install/upgrade through Module Admin
+or `fwconsole ma install registrationwatch`, then check the FreePBX logs for a
+job-registration error and list the jobs again. If the webhook job is present
+but deliveries are not progressing, run that job using its listed ID, check
+FreePBX logs, and inspect **Recent webhook deliveries** in Registration Watch.
+The worker records delivery failures there; a successful job invocation does
+not by itself mean the remote endpoint accepted a delivery.
 
 The module does not install a daemon, systemd unit, AMI event listener, custom
-probe service, webhook sender, or SMS sender.
+probe service, or SMS sender. Uninstallation removes both
+`registrationwatch :: monitor` and `registrationwatch :: webhooks`.
 
 ## Data Model
 
@@ -413,6 +704,7 @@ The canonical Registration Watch table names are:
 * `registrationwatch_settings`
 * `registrationwatch_alert_history`
 * `registrationwatch_alert_escalation`
+* `registrationwatch_webhook_queue`
 
 `registrationwatch_registrations` stores watched registration entries,
 including discovered contact details, watch toggles, admin notes, and the latest
@@ -445,6 +737,25 @@ individual messages were not sent because a Storm Summary was used.
 `registrationwatch_alert_escalation` stores repeat-alert reminder state for
 registrations that remain unavailable, tracking when the next reminder is due
 under the configured repeat mode.
+
+`registrationwatch_webhook_queue` stores one queued delivery per destination
+and logical event. Its states are `pending`, `processing`, `delivered`,
+`failed`, and `suppressed`. It records the payload, attempt count, next retry
+time, last attempt, HTTP status, and bounded error text; its recent rows are
+shown as webhook delivery history. Transient connection failures, HTTP 408,
+429, and 5xx responses are retried up to three attempts. Only one delivery is
+attempted by each webhook-job run.
+
+The queue is limited to 5,000 pending/processing rows and 10,000 rows total.
+When the total limit is reached, old terminal rows (`delivered`, `failed`, or
+`suppressed`) are pruned in batches before new events are accepted; if the
+pending/processing or total limit still prevents insertion, new webhook events
+are not queued and a warning is logged. Terminal rows older than 30 days are
+removed during an idle worker pass. An upgrade creates this table if it does
+not exist and widens the settings value column for webhook configuration; it
+does not reset existing settings, monitoring selections, registrations, or
+notification history. Uninstallation drops the webhook queue along with the
+other `registrationwatch_*` tables.
 
 ## Alerting
 
@@ -560,13 +871,31 @@ Registration Watch reports the contact state exposed by Asterisk and does not at
 ## Snooze Monitoring
 
 Snooze Monitoring is a global pause control in the top monitoring banner. While
-active, Registration Watch continues to record registration state changes but
-does not send alert emails.
+active, Registration Watch continues to reconcile and record registration
+state changes, but suppresses eligible email and webhook notifications.
 
 * The snooze is global and applies to all watched registrations.
 * Monitoring can be resumed manually before the snooze period ends.
-* Watched registrations, settings, and history are not affected by snoozing.
+* Snoozing does not reset watched registrations or settings, or delete existing
+  history. Reconciliation continues to add status transitions and notification
+  suppression records to the relevant histories.
 * There is no per-registration snooze.
+* New alertable transitions during a snooze remain in Status History. Eligible
+  email notification attempts are recorded as suppressed; webhook events
+  created during the snooze are queued with status `suppressed` and are not
+  sent.
+* A webhook delivery that was already pending is not removed when snoozing
+  starts. If the worker processes it while the snooze is active, it is marked
+  suppressed without making an HTTP request or consuming an attempt. If
+  monitoring is resumed first, the still-pending delivery can be processed
+  afterwards.
+* Recovery transitions are still recorded during a snooze. Webhook recovery
+  delivery follows the existing corresponding-problem-event rule and snooze
+  check; a recovery does not cause a suppressed problem event to be replayed.
+* Resuming clears the snooze setting; it does not replay webhook rows already
+  marked `suppressed` or resend email attempts already recorded as suppressed.
+  Pending webhook rows not yet processed remain subject to the worker behavior
+  described above.
 
 ## User Interface
 
@@ -578,6 +907,7 @@ The admin page supports narrow and mobile viewports, while wide data tables reta
 * **Monitoring banner** -- shows the current monitoring state (active, inactive, or snoozed) with Snooze/Resume controls.
 * **Registration Status Map** -- shows all discovered registrations. Supports Cards and Rows views. The Row view has sortable columns.
 * **Alert Settings** -- configures recipients, alert triggers, debounce, repeat alerts, storm threshold, and topology polling.
+* **Webhooks** -- configures multiple destinations, custom payloads, private-network exceptions, tests, and recent delivery results.
 * **Watched Extensions** -- lists watched registrations with extension-level monitoring toggles, repeat-alert overrides, and admin notes. Columns are sortable.
 * **Status History** -- records registration state transitions. Retained history is paginated in bounded pages, with sorting across the complete retained history.
 * **Alert History** -- records sent and suppressed alert attempts. Retained history is paginated in bounded pages, with sorting across the complete retained history.
@@ -594,10 +924,15 @@ Registration Status Map and Watched Extensions.
 * Persisted UI settings are restricted to known setting keys and allowed values.
 * SQL writes and history deletes use prepared statements.
 * Asterisk access is read-only in this phase.
-* No shell execution is used by the module.
+* The module runtime does not execute shell commands. The separate release packaging CLI invokes local tar/gzip tools.
 * Alerts are not sent merely from page load.
+* Webhook requests use HTTPS by default, reject unsafe resolved addresses, pin DNS results, disable redirects/proxies, and verify TLS certificates.
+* Webhook authentication headers are encrypted before storage and are not exposed in GUI responses or delivery diagnostics.
 
-Granular FreePBX ACL integration is still future work.
+Webhook destination configuration, testing, deletion, and delivery history are
+available only to full FreePBX administrators. Registration Watch's other
+permissions and read-only monitoring views remain governed by the existing
+FreePBX module access.
 
 ## Current Limitations
 
@@ -605,9 +940,13 @@ Granular FreePBX ACL integration is still future work.
 * No AMI ContactStatus listener yet.
 * No custom probes.
 * No maintenance windows yet.
-* No webhook or SMS alert delivery yet.
+* No SMS alert delivery.
+* Native Module Admin update discovery is source-verified for FreePBX 16 and 17 but has not been tested on live installations. No `version.json` is published for this development checkout, so no release is currently advertised; see [Native update discovery](#native-update-discovery).
+* Configurable email subject/body templates are deferred; existing email content and transport behavior are unchanged.
 * Short flaps can be missed between reconciliation runs.
 * Email delivery depends on the PBX mail sender and relay setup.
+* Webhook hostname lookups use a bounded direct DNS exchange with a monotonic 2-second deadline and fail closed on timeout, missing `hrtime()`, or invalid responses. HTTP delivery separately has a 2-second connect timeout and a 5-second overall timeout.
+* Webhook Storm Threshold batching is not implemented; the email Storm Threshold applies to email summaries only.
 * Snooze Monitoring is global, not per-registration.
 * Registration Watch only watches registrations for configured FreePBX PJSIP
   devices (extensions). PJSIP trunks and other non-device PJSIP objects are not
@@ -623,25 +962,68 @@ Granular FreePBX ACL integration is still future work.
 
 ## Validation
 
-Useful local checks:
+### Development validation
+
+Run these checks from the root of a complete source checkout containing the
+tests and packaging scripts. They are developer checks and are not available
+from an installed module archive.
+
+Check PHP syntax, including both FreePBX job classes, and validate the module
+identity and release version:
 
 ```sh
-cd /var/www/html/admin/modules/registrationwatch
-php -l Registrationwatch.class.php
-php -l Job.php
-php -l page.registrationwatch.php
-php -l install.php
-php -l uninstall.php
-php -l views/main.php
-php -r '$xml = simplexml_load_file("module.xml"); echo $xml ? "module.xml parsed\n" : "module.xml failed\n";'
+find . -path './.git' -prune -o -name '*.php' -print0 | xargs -0 -n1 php -l
+php -r '$module = simplexml_load_file("module.xml"); if (!$module || (string)$module->rawname !== "registrationwatch" || (string)$module->version !== "1.5.0") { fwrite(STDERR, "Invalid module metadata\n"); exit(1); }'
+```
+
+Run all PHP contract tests:
+
+```sh
 php tests/email_from_contract.php
 php tests/history_pagination_contract.php
+php tests/install_migration_contract.php
 php tests/repeat_alerting_contract.php
 php tests/reset_from_asterisk_contract.php
 php tests/version_compatibility_contract.php
+php tests/webhook_contract.php
+php tests/webhook_queue_contract.php
+php tests/packaging_contract.php
+php tests/update_metadata_contract.php
 ```
 
-On a real FreePBX/PBXact 16 or 17 system:
+Build and checksum the unsigned development archive:
+
+```sh
+php scripts/package.php --unsigned --output-dir=dist
+sha256sum dist/registrationwatch-1.5.0-unsigned.tgz > dist/registrationwatch-1.5.0-unsigned.tgz.sha256
+sha256sum --check dist/registrationwatch-1.5.0-unsigned.tgz.sha256
+```
+
+The package builder validates the archive structure. The packaging contract
+builds the archive twice and compares the bytes to check reproducibility. The
+webhook tests use stubbed DNS and HTTP transports, and the update-metadata
+contract uses local files only; these tests make no external requests.
+
+### Installed FreePBX verification
+
+Perform these checks on an actual FreePBX/PBXact 16 or 17 installation after
+installing an authorized signed package. Do not run development tests or
+packaging scripts from the installed module directory; they are not included
+in the installation archive.
+
+Confirm the module is installed at the expected version and check its status:
+
+```sh
+fwconsole ma list | grep -i registrationwatch
+grep -m1 '<version>' /var/www/html/admin/modules/registrationwatch/module.xml
+```
+
+In **Admin > Module Admin**, confirm the module identity, installed version,
+and signature verification status. A development unsigned archive is not a
+production installation artifact.
+
+Reload FreePBX, verify both registered jobs, and run each using the job ID
+reported by the list:
 
 ```sh
 fwconsole reload
@@ -649,10 +1031,21 @@ fwconsole job --list | grep -i registrationwatch
 fwconsole job --run=<job_id> --force
 ```
 
+Confirm that the list contains `registrationwatch :: monitor` and
+`registrationwatch :: webhooks`. Run the listed ID for each job. Verify that
+registration monitoring updates the Registration Watch page and Status
+History. As a full FreePBX administrator, send a webhook test from the
+Webhooks section and confirm its result in Recent webhook deliveries. Before
+and after an upgrade, compare the existing monitoring selections, settings,
+registrations, and notification history; upgrade without uninstalling.
+
 ## Uninstalling
 
-Uninstalling Registration Watch removes the module job and drops
-`registrationwatch_*` tables. Back up first if you need Registration Watch data.
+Uninstalling Registration Watch removes the `registrationwatch :: monitor`
+and `registrationwatch :: webhooks` jobs and drops all
+`registrationwatch_*` tables, including `registrationwatch_webhook_queue`.
+Back up first if you need Registration Watch settings, monitoring selections,
+registration records, notification history, or queued webhook history.
 
 ```sh
 fwconsole ma uninstall registrationwatch --force
@@ -662,6 +1055,30 @@ fwconsole reload
 ```
 
 ## Release History
+
+### 1.5.0, development release
+
+Adds multiple configurable webhook destinations with POST/JSON and opt-in GET,
+safe JSON template substitution, encrypted authentication headers, and
+administrator-only destination configuration, testing, and delivery history.
+Delivery uses a separate FreePBX webhook job, isolated from registration
+monitoring and email sending, with bounded DNS resolution, DNS/IP-based SSRF
+protection, a persistent queue, bounded retries, event identifiers, and
+delivery status history. Webhook events follow Registration Watch's existing
+eligibility rules for watched registrations, transitions, debounce, snooze,
+alert types, and recovery.
+Existing monitoring selections, settings, notification history, and email
+delivery behaviour are preserved during upgrade.
+
+Adds a repeatable `.tgz` package builder with explicit production-file
+inclusion, deterministic archive metadata, structure checks, and fail-closed
+signed-package validation. The checked-in 1.4.4 signature is not reused; the
+local 1.5.0 development archive and manually dispatched CI artifact are
+explicitly unsigned and review-only. Native FreePBX 16/17 update discovery is
+configured, but the development build does not publish `version.json` or
+advertise a release. A production 1.5.0 release still requires live FreePBX
+testing, authorized signing, and publication of the signed package and update
+metadata. Email subject/body templating is deferred.
 
 ### 1.4.4, patch release, 15 October 2026
 

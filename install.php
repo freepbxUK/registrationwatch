@@ -71,7 +71,7 @@ $sql[] = "CREATE TABLE IF NOT EXISTS registrationwatch_status_history (
 
 $sql[] = "CREATE TABLE IF NOT EXISTS registrationwatch_settings (
 	setting_key VARCHAR(80) NOT NULL,
-	setting_value TEXT NULL,
+	setting_value MEDIUMTEXT NULL,
 	updated_at DATETIME NULL,
 	PRIMARY KEY (setting_key)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4";
@@ -128,11 +128,37 @@ $sql[] = "CREATE TABLE IF NOT EXISTS registrationwatch_alert_escalation (
 	KEY registrationwatch_alert_escalation_repeat_mode (repeat_mode)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4";
 
+$sql[] = "CREATE TABLE IF NOT EXISTS registrationwatch_webhook_queue (
+	id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+	destination_id CHAR(32) NOT NULL,
+	event_id CHAR(64) NOT NULL,
+	registration_id INT UNSIGNED NOT NULL,
+	history_id BIGINT UNSIGNED NOT NULL,
+	incident_start_history_id BIGINT UNSIGNED NOT NULL,
+	alert_type VARCHAR(40) NOT NULL,
+	event_type VARCHAR(80) NOT NULL,
+	payload TEXT NOT NULL,
+	status VARCHAR(16) NOT NULL DEFAULT 'pending',
+	attempts TINYINT UNSIGNED NOT NULL DEFAULT 0,
+	next_attempt_at DATETIME NOT NULL,
+	last_attempt_at DATETIME NULL,
+	http_status SMALLINT UNSIGNED NULL,
+	last_error VARCHAR(512) NULL,
+	created_at DATETIME NOT NULL,
+	updated_at DATETIME NOT NULL,
+	PRIMARY KEY (id),
+	UNIQUE KEY registrationwatch_webhook_event_destination (event_id, destination_id),
+	KEY registrationwatch_webhook_queue_due (status, next_attempt_at, id),
+	KEY registrationwatch_webhook_queue_history (registration_id, history_id),
+	KEY registrationwatch_webhook_queue_created (created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4";
+
 foreach ($sql as $statement) {
 	$db->query($statement);
 }
 
 $db->query("ALTER TABLE registrationwatch_registrations MODIFY COLUMN notes VARCHAR(72) NOT NULL DEFAULT ''");
+$db->query("ALTER TABLE registrationwatch_settings MODIFY COLUMN setting_value MEDIUMTEXT NULL");
 
 $defaultSettings = [
 	'alert_enabled' => '0',
@@ -283,6 +309,14 @@ try {
                         'registrationwatch',
                         'monitor',
                         '\FreePBX\modules\Registrationwatch\Job',
+                        '* * * * *',
+                        30,
+                        true
+                );
+                \FreePBX::Job()->addClass(
+                        'registrationwatch',
+                        'webhooks',
+                        '\FreePBX\modules\Registrationwatch\WebhookJob',
                         '* * * * *',
                         30,
                         true

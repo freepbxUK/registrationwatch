@@ -1,0 +1,51 @@
+name: Validate and package review artifact
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: curl, pdo_sqlite, simplexml
+          coverage: none
+
+      - name: Check PHP syntax
+        run: find . -path './.git' -prune -o -name '*.php' -print0 | xargs -0 -n1 php -l
+
+      - name: Validate module metadata
+        run: php -r '$module = simplexml_load_file("module.xml"); if (!$module || (string)$module->rawname !== "registrationwatch" || (string)$module->version !== "1.5.0") { fwrite(STDERR, "Invalid module metadata\n"); exit(1); }'
+
+      - name: Run contract tests
+        run: |
+          php tests/email_from_contract.php
+          php tests/history_pagination_contract.php
+          php tests/install_migration_contract.php
+          php tests/repeat_alerting_contract.php
+          php tests/reset_from_asterisk_contract.php
+          php tests/update_metadata_contract.php
+          php tests/version_compatibility_contract.php
+          php tests/webhook_contract.php
+          php tests/webhook_queue_contract.php
+          php tests/packaging_contract.php
+
+      - name: Build unsigned review archive
+        run: php scripts/package.php --unsigned --output-dir=dist
+
+      - name: Upload unsigned review artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: registrationwatch-${{ github.sha }}-unsigned-review-only
+          path: dist/registrationwatch-*-unsigned.tgz
+          if-no-files-found: error
+          retention-days: 7

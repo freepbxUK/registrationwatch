@@ -6,6 +6,8 @@
  * @var array $registrations
  * @var array $statusHistory
  * @var array $alertSettings
+ * @var array $webhookDestinations
+ * @var array $webhookHistory
  * @var array $pruneSettings
  * @var array $alertHistory
  * @var string $lastRefresh
@@ -27,6 +29,8 @@ $statusHistoryTotal = isset($statusHistoryPage['total']) ? (int)$statusHistoryPa
 $statusHistoryOffset = isset($statusHistoryPage['offset']) ? (int)$statusHistoryPage['offset'] : 0;
 $statusHistoryLimit = isset($statusHistoryPage['limit']) ? (int)$statusHistoryPage['limit'] : 25;
 $alertSettings = isset($alertSettings) && is_array($alertSettings) ? $alertSettings : [];
+$webhookDestinations = isset($webhookDestinations) && is_array($webhookDestinations) ? $webhookDestinations : [];
+$webhookHistory = isset($webhookHistory) && is_array($webhookHistory) ? $webhookHistory : [];
 $pruneSettings = isset($pruneSettings) && is_array($pruneSettings) ? $pruneSettings : [];
 $alertHistoryPage = isset($alertHistory) && is_array($alertHistory) ? $alertHistory : [];
 $alertHistory = isset($alertHistoryPage['rows']) && is_array($alertHistoryPage['rows']) ? $alertHistoryPage['rows'] : [];
@@ -288,6 +292,144 @@ $_rwAssetVer = max(
 			</div>
 
 			<div id="rw-message" class="alert rw-message" style="display:none;"></div>
+		</div>
+	</div>
+
+	<div class="row rw-section" id="rw-webhooks"<?php echo empty($webhookAuthorized) ? ' style="display:none;"' : ''; ?>>
+		<div class="col-sm-12">
+			<div class="panel panel-default">
+				<div class="panel-heading rw-webhook-heading">
+					<h3 class="panel-title"><?php echo _('Webhooks'); ?></h3>
+					<button type="button" class="btn btn-primary btn-sm" id="rw-new-webhook">
+						<i class="fa fa-plus"></i> <?php echo _('Add destination'); ?>
+					</button>
+				</div>
+				<div class="panel-body">
+					<p><?php echo _('Webhooks use the same watched-registration, alert-type, debounce, snooze, and recovery rules as email alerts. Delivery is queued by the Registration Watch background job and does not replace email notifications.'); ?></p>
+					<div class="table-responsive">
+						<table class="table table-striped table-condensed rw-webhook-destinations">
+							<thead>
+								<tr>
+									<th><?php echo _('Name'); ?></th>
+									<th><?php echo _('Destination'); ?></th>
+									<th><?php echo _('Method'); ?></th>
+									<th><?php echo _('State'); ?></th>
+									<th><?php echo _('Actions'); ?></th>
+								</tr>
+							</thead>
+							<tbody id="rw-webhook-destination-rows">
+								<?php if (!$webhookDestinations): ?>
+									<tr class="rw-webhook-empty"><td colspan="5"><?php echo _('No webhook destinations configured.'); ?></td></tr>
+								<?php else: ?>
+									<?php foreach ($webhookDestinations as $destination): ?>
+										<tr>
+											<td><?php echo htmlspecialchars((string)$destination['name'], ENT_QUOTES, 'UTF-8'); ?></td>
+											<td class="rw-webhook-url"><?php echo htmlspecialchars((string)$destination['url'], ENT_QUOTES, 'UTF-8'); ?></td>
+											<td><?php echo htmlspecialchars((string)$destination['method'], ENT_QUOTES, 'UTF-8'); ?></td>
+											<td><?php echo !empty($destination['enabled']) ? _('Enabled') : _('Disabled'); ?></td>
+											<td>
+												<button type="button" class="btn btn-xs btn-default rw-edit-webhook" data-destination-id="<?php echo htmlspecialchars((string)$destination['id'], ENT_QUOTES, 'UTF-8'); ?>"><?php echo _('Edit'); ?></button>
+												<button type="button" class="btn btn-xs btn-info rw-test-webhook" data-destination-id="<?php echo htmlspecialchars((string)$destination['id'], ENT_QUOTES, 'UTF-8'); ?>"><?php echo _('Test'); ?></button>
+												<button type="button" class="btn btn-xs btn-danger rw-delete-webhook" data-destination-id="<?php echo htmlspecialchars((string)$destination['id'], ENT_QUOTES, 'UTF-8'); ?>"><?php echo _('Remove'); ?></button>
+											</td>
+										</tr>
+									<?php endforeach; ?>
+								<?php endif; ?>
+							</tbody>
+						</table>
+					</div>
+
+					<div id="rw-webhook-editor" class="rw-webhook-editor" style="display:none;">
+						<h4 id="rw-webhook-editor-title"><?php echo _('Add webhook destination'); ?></h4>
+						<input type="hidden" id="rw-webhook-id" value="">
+						<div class="row">
+							<div class="col-sm-6">
+								<div class="form-group">
+									<label for="rw-webhook-name"><?php echo _('Destination name'); ?></label>
+									<input type="text" id="rw-webhook-name" class="form-control" maxlength="80" autocomplete="off">
+								</div>
+								<div class="form-group">
+									<label for="rw-webhook-url"><?php echo _('URL'); ?></label>
+									<input type="url" id="rw-webhook-url" class="form-control" maxlength="2048" placeholder="https://example.invalid/webhook" autocomplete="off">
+								</div>
+								<div class="form-group">
+									<label for="rw-webhook-method"><?php echo _('HTTP method'); ?></label>
+									<select id="rw-webhook-method" class="form-control">
+										<option value="POST" selected>POST (JSON)</option>
+										<option value="GET">GET (query parameters)</option>
+									</select>
+								</div>
+								<div class="checkbox">
+									<label>
+										<input type="checkbox" id="rw-webhook-enabled" checked>
+										<?php echo _('Enable this destination'); ?>
+									</label>
+								</div>
+								<div class="checkbox">
+									<label>
+										<input type="checkbox" id="rw-webhook-allow-private">
+										<?php echo _('Allow a private RFC1918/ULA address for an internal integration'); ?>
+									</label>
+									<p class="help-block"><?php echo _('Off by default. This explicit exception still blocks loopback, link-local, reserved, and cloud metadata addresses. HTTP is accepted only when the resolved destination is private.'); ?></p>
+								</div>
+							</div>
+							<div class="col-sm-6">
+								<div class="form-group">
+									<label for="rw-webhook-headers"><?php echo _('Custom headers (JSON object)'); ?></label>
+									<textarea id="rw-webhook-headers" class="form-control" rows="3" autocomplete="off" spellcheck="false" placeholder='{"Authorization":"Bearer your-token"}'></textarea>
+									<p class="help-block" id="rw-webhook-header-help"><?php echo _('Header values are encrypted using the local FreePBX database credential. Saved values are never displayed; leave blank to keep existing values.'); ?></p>
+									<label class="checkbox-inline">
+										<input type="checkbox" id="rw-webhook-clear-headers">
+										<?php echo _('Clear saved headers'); ?>
+									</label>
+								</div>
+								<div class="form-group">
+									<label for="rw-webhook-template"><?php echo _('Custom JSON payload template (optional)'); ?></label>
+									<textarea id="rw-webhook-template" class="form-control" rows="5" maxlength="8192" spellcheck="false" placeholder='{"event":"{{event}}","extension":"{{extension}}","current_status":"{{current_status}}"}'></textarea>
+									<p class="help-block"><?php echo _('Use JSON string values such as "{{extension}}". Available variables: {{event}}, {{event_id}}, {{extension}}, {{technology}}, {{previous_status}}, {{current_status}}, {{timestamp}}, {{source}}, {{system_identifier}}, {{alert_type}}. Unknown/missing values are rejected or rendered as empty strings.'); ?></p>
+								</div>
+							</div>
+						</div>
+						<div class="rw-webhook-editor-actions">
+							<button type="button" class="btn btn-primary" id="rw-save-webhook"><?php echo _('Save destination'); ?></button>
+							<button type="button" class="btn btn-default" id="rw-cancel-webhook"><?php echo _('Cancel'); ?></button>
+							<span id="rw-webhook-test-result" role="status" aria-live="polite"></span>
+						</div>
+					</div>
+
+					<h4><?php echo _('Recent webhook deliveries'); ?></h4>
+					<div class="table-responsive">
+						<table class="table table-condensed rw-webhook-history">
+							<thead>
+								<tr>
+									<th><?php echo _('Time'); ?></th>
+									<th><?php echo _('Event'); ?></th>
+									<th><?php echo _('Status'); ?></th>
+									<th><?php echo _('HTTP'); ?></th>
+									<th><?php echo _('Attempts'); ?></th>
+									<th><?php echo _('Result'); ?></th>
+								</tr>
+							</thead>
+							<tbody>
+								<?php if (!$webhookHistory): ?>
+									<tr><td colspan="6"><?php echo _('No webhook delivery attempts have been recorded.'); ?></td></tr>
+								<?php else: ?>
+									<?php foreach ($webhookHistory as $delivery): ?>
+										<tr>
+											<td><?php echo htmlspecialchars((string)($delivery['last_attempt_at'] ?? $delivery['created_at'] ?? ''), ENT_QUOTES, 'UTF-8'); ?></td>
+											<td><?php echo htmlspecialchars((string)($delivery['event_type'] ?? ''), ENT_QUOTES, 'UTF-8'); ?></td>
+											<td><?php echo htmlspecialchars((string)($delivery['status'] ?? ''), ENT_QUOTES, 'UTF-8'); ?></td>
+											<td><?php echo htmlspecialchars((string)($delivery['http_status'] ?? '-'), ENT_QUOTES, 'UTF-8'); ?></td>
+											<td><?php echo (int)($delivery['attempts'] ?? 0); ?></td>
+											<td><?php echo htmlspecialchars((string)($delivery['last_error'] ?? '-'), ENT_QUOTES, 'UTF-8'); ?></td>
+										</tr>
+									<?php endforeach; ?>
+								<?php endif; ?>
+							</tbody>
+						</table>
+					</div>
+				</div>
+			</div>
 		</div>
 	</div>
 
@@ -739,6 +881,9 @@ window.rwUiSettings = {
 	alertHistorySortKey: <?php echo json_encode($uiAlertHistorySortKey); ?>,
 	alertHistorySortDir: <?php echo json_encode($uiAlertHistorySortDir); ?>
 };
+window.rwWebhookDestinations = <?php
+echo json_encode($webhookDestinations, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT);
+?>;
 </script>
 <script src="modules/registrationwatch/assets/js/registrationwatch.js?v=<?php echo $_rwAssetVer; ?>"></script>
 <script>

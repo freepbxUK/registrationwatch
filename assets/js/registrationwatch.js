@@ -731,6 +731,171 @@
 		$('#rw-alert-enabled, #rw-alert-recipients, #rw-alert-on-unreachable, #rw-alert-on-not-registered, #rw-alert-on-recovery, #rw-debounce-seconds, #rw-repeat-mode, #rw-storm-threshold')
 			.on('input change', markAlertSettingsDirty);
 
+		function renderWebhookDestinations(destinations) {
+			window.rwWebhookDestinations = $.isArray(destinations) ? destinations : [];
+			if (!window.rwWebhookDestinations.length) {
+				$('#rw-webhook-destination-rows').html('<tr class="rw-webhook-empty"><td colspan="5">No webhook destinations configured.</td></tr>');
+				return;
+			}
+			var rows = $.map(window.rwWebhookDestinations, function (destination) {
+				var id = escapeHtmlValue(destination.id);
+				return '<tr>'
+					+ '<td>' + escapeHtml(destination.name) + '</td>'
+					+ '<td class="rw-webhook-url">' + escapeHtml(destination.url) + '</td>'
+					+ '<td>' + escapeHtml(destination.method) + '</td>'
+					+ '<td>' + (destination.enabled ? 'Enabled' : 'Disabled') + '</td>'
+					+ '<td><button type="button" class="btn btn-xs btn-default rw-edit-webhook" data-destination-id="' + id + '">Edit</button> '
+					+ '<button type="button" class="btn btn-xs btn-info rw-test-webhook" data-destination-id="' + id + '">Test</button> '
+					+ '<button type="button" class="btn btn-xs btn-danger rw-delete-webhook" data-destination-id="' + id + '">Remove</button></td>'
+					+ '</tr>';
+			});
+			$('#rw-webhook-destination-rows').html(rows.join(''));
+		}
+
+		function resetWebhookEditor() {
+			$('#rw-webhook-id, #rw-webhook-name, #rw-webhook-url, #rw-webhook-headers, #rw-webhook-template').val('');
+			$('#rw-webhook-method').val('POST');
+			$('#rw-webhook-enabled').prop('checked', true);
+			$('#rw-webhook-allow-private, #rw-webhook-clear-headers').prop('checked', false);
+			$('#rw-webhook-editor-title').text('Add webhook destination');
+			$('#rw-webhook-header-help').text('Header values are encrypted using the local FreePBX database credential. Saved values are never displayed; leave blank to keep existing values.');
+			$('#rw-webhook-test-result').removeClass('text-success text-danger').text('');
+			$('#rw-webhook-editor').show();
+		}
+
+		$('#rw-new-webhook').on('click', resetWebhookEditor);
+		$('#rw-cancel-webhook').on('click', function () {
+			$('#rw-webhook-editor').hide();
+			$('#rw-webhook-test-result').removeClass('text-success text-danger').text('');
+		});
+		root.on('click', '.rw-edit-webhook', function () {
+			var id = String($(this).attr('data-destination-id') || '');
+			var destination = $.grep(window.rwWebhookDestinations || [], function (item) {
+				return String(item.id) === id;
+			})[0];
+			if (!destination) {
+				showMessage('The webhook destination is no longer available. Reload the page and try again.', 'error');
+				return;
+			}
+			resetWebhookEditor();
+			$('#rw-webhook-id').val(destination.id);
+			$('#rw-webhook-name').val(destination.name || '');
+			$('#rw-webhook-url').val(destination.url || '');
+			$('#rw-webhook-method').val(destination.method || 'POST');
+			$('#rw-webhook-enabled').prop('checked', !!destination.enabled);
+			$('#rw-webhook-allow-private').prop('checked', !!destination.allow_private);
+			$('#rw-webhook-template').val(destination.payload_template || '');
+			$('#rw-webhook-editor-title').text('Edit webhook destination');
+			if (destination.header_names && destination.header_names.length) {
+				$('#rw-webhook-header-help').text('Saved headers: ' + destination.header_names.join(', ') + '. Values are encrypted and never displayed. Leave blank to keep them, or select Clear saved headers.');
+			}
+		});
+
+		$('#rw-save-webhook').on('click', function () {
+			var button = $(this);
+			var token = registrationWatchToken(root);
+			if (!token) {
+				showMessage('Security token unavailable. Please reload the page and try again.', 'error');
+				return;
+			}
+			button.prop('disabled', true);
+			$.ajax({
+				url: 'ajax.php?module=registrationwatch',
+				method: 'POST',
+				dataType: 'json',
+				data: {
+					command: 'savewebhook',
+					token: token,
+					destination_id: $('#rw-webhook-id').val(),
+					name: $('#rw-webhook-name').val(),
+					url: $('#rw-webhook-url').val(),
+					method: $('#rw-webhook-method').val(),
+					enabled: $('#rw-webhook-enabled').is(':checked') ? 1 : 0,
+					allow_private: $('#rw-webhook-allow-private').is(':checked') ? 1 : 0,
+					payload_template: $('#rw-webhook-template').val(),
+					custom_headers_json: $('#rw-webhook-headers').val(),
+					clear_headers: $('#rw-webhook-clear-headers').is(':checked') ? 1 : 0
+				}
+			}).done(function (response) {
+				if (!response || !response.status) {
+					showMessage(response && response.message ? response.message : 'Unable to save webhook destination.', 'error');
+					return;
+				}
+				renderWebhookDestinations(response.webhookDestinations);
+				$('#rw-webhook-editor').hide();
+				showMessage(response.message || 'Webhook destination saved.', 'success');
+			}).fail(function () {
+				showMessage('Unable to save webhook destination.', 'error');
+			}).always(function () {
+				button.prop('disabled', false);
+			});
+		});
+
+		function sendWebhookTest(destinationId, button) {
+			var token = registrationWatchToken(root);
+			if (!token) {
+				showMessage('Security token unavailable. Please reload the page and try again.', 'error');
+				return;
+			}
+			button.prop('disabled', true);
+			$('#rw-webhook-test-result').removeClass('text-success text-danger').text('Sending test event...');
+			$.ajax({
+				url: 'ajax.php?module=registrationwatch',
+				method: 'POST',
+				dataType: 'json',
+				data: { command: 'testwebhook', token: token, destination_id: destinationId }
+			}).done(function (response) {
+				var message = response && response.message ? response.message : 'Webhook test failed.';
+				$('#rw-webhook-test-result')
+					.removeClass('text-success text-danger')
+					.addClass(response && response.status ? 'text-success' : 'text-danger')
+					.text(message);
+				if (!response || !response.status) {
+					showMessage(message, 'error');
+				}
+			}).fail(function () {
+				$('#rw-webhook-test-result').removeClass('text-success').addClass('text-danger').text('Webhook test request failed.');
+				showMessage('Webhook test request failed.', 'error');
+			}).always(function () {
+				button.prop('disabled', false);
+			});
+		}
+
+		root.on('click', '.rw-test-webhook', function () {
+			sendWebhookTest(String($(this).attr('data-destination-id') || ''), $(this));
+		});
+
+		root.on('click', '.rw-delete-webhook', function () {
+			var button = $(this);
+			var destinationId = String(button.attr('data-destination-id') || '');
+			if (!window.confirm('Remove this webhook destination and cancel its queued deliveries?')) {
+				return;
+			}
+			var token = registrationWatchToken(root);
+			if (!token) {
+				showMessage('Security token unavailable. Please reload the page and try again.', 'error');
+				return;
+			}
+			button.prop('disabled', true);
+			$.ajax({
+				url: 'ajax.php?module=registrationwatch',
+				method: 'POST',
+				dataType: 'json',
+				data: { command: 'deletewebhook', token: token, destination_id: destinationId }
+			}).done(function (response) {
+				if (!response || !response.status) {
+					showMessage(response && response.message ? response.message : 'Unable to remove webhook destination.', 'error');
+					return;
+				}
+				renderWebhookDestinations(response.webhookDestinations);
+				showMessage(response.message || 'Webhook destination removed.', 'success');
+			}).fail(function () {
+				showMessage('Unable to remove webhook destination.', 'error');
+			}).always(function () {
+				button.prop('disabled', false);
+			});
+		});
+
 		$('.registrationwatch').on('change', '.rw-enabled', function () {
 			var input = $(this);
 			var row = input.closest('tr');
