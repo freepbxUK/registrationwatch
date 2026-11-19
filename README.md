@@ -7,7 +7,7 @@ alerts when watched registrations become unavailable or recover.
 
 **Signed Release**
 
-Registration Watch 1.4.1 was the first signed FreePBX UK release of the module. Signed releases use the established developer GPG identity, signed by the FreePBX Module Signing v2 master key. This 1.5.0 development checkout is not signed: its checked-in `module.sig` belongs to 1.4.4 and must not be used for a 1.5.0 package.
+Registration Watch 1.4.1 was the first signed FreePBX UK release of the module. Signed releases use the established developer GPG identity, signed by the FreePBX Module Signing v2 master key. This 1.5.0 development checkout is not signed. The 1.4.4 `module.sig` from the earlier development baseline has been removed and must not be copied back or used for a 1.5.0 package.
 
 Multiple registrations under the same extension may be tracked separately where
 Registration Watch can distinguish them from Asterisk/FreePBX contact data.
@@ -39,6 +39,17 @@ and publication of its release asset and update metadata.
 
 Use the `main` branch for stable releases. Development and release-candidate
 branches may contain incomplete or test-only changes.
+
+## Installation and upgrade guide
+
+* [New production installation](#new-production-installation) uses a published,
+  correctly signed `.tgz` uploaded through Module Admin.
+* [Upgrade an existing installation](#upgrading-an-existing-installation)
+  preserves Registration Watch data and must not begin with an uninstall.
+* [Development installations](#development-installations) use the unsigned
+  repository-root archive for controlled testing only.
+* [Post-installation and post-upgrade checks](#verify-the-installation-or-update)
+  provide a compact command and UI checklist.
 
 ## Compatibility
 
@@ -86,17 +97,31 @@ Do not use:
 fwconsole ma installlocal registrationwatch
 ```
 
-Use Module Admin's upload/install action for a `.tgz`. For directory-based
-installation methods, use `fwconsole ma install registrationwatch`.
+Use Module Admin's upload/install action for a production `.tgz`. For
+directory-based development installation methods, use
+`fwconsole ma install registrationwatch`.
 
-### Option 1: Upload a `.tgz` in Module Admin
+### New production installation
 
-In **Admin > Module Admin**, use the module upload/install control and select
-the latest published signed Registration Watch archive. Review the module
-identity, version, and signature status shown by Module Admin, then install it
-and run `fwconsole chown` and `fwconsole reload`. Use a signed
-`registrationwatch-1.5.0.tgz` only after the final 1.5.0 production package is
-published.
+1. Obtain the latest published Registration Watch release archive from the
+   project's official GitHub Releases page. Use the versioned archive that is
+   correctly signed; the latest published stable release is currently 1.4.4.
+2. In FreePBX/PBXact, open **Admin > Module Admin** and use its upload/install
+   control.
+3. Upload the signed `.tgz`, review the displayed module identity, version and
+   signature status, and approve installation.
+4. Apply FreePBX ownership and reload the configuration:
+
+   ```sh
+   fwconsole chown
+   fwconsole reload
+   ```
+
+5. Complete the [verification procedure](#verify-the-installation-or-update).
+   Confirm that the installed version matches the selected release and that
+   Module Admin reports a valid signature.
+6. Confirm that Registration Watch appears under **Reports > Registration
+   Watch**.
 
 The archive must contain a `registrationwatch/` directory at its root. The
 development candidate produced by the local packaging script is named
@@ -104,9 +129,22 @@ development candidate produced by the local packaging script is named
 installations only and does not contain a valid signature. Do not treat it as
 a production release or upload it to production systems.
 
-### Option 2: Install from an unpacked module directory
+### Development installations
 
-Place the `registrationwatch` directory in `/var/www/html/admin/modules/`, then:
+The repository-root files:
+
+```text
+registrationwatch-1.5.0-unsigned.tgz
+registrationwatch-1.5.0-unsigned.tgz.sha256
+```
+
+are unsigned development artefacts for structural verification and controlled
+testing. They are not a trusted production release and do not make this
+development branch the latest stable release. Do not upload the unsigned
+archive to a production PBX.
+
+For an unpacked development module directory, place the `registrationwatch`
+directory in `/var/www/html/admin/modules/`, then:
 
 ```sh
 cd /var/www/html/admin/modules/registrationwatch
@@ -116,7 +154,7 @@ fwconsole chown
 fwconsole reload
 ```
 
-### Option 3: Install from GitHub
+### Install an unpacked development copy from GitHub
 
 FreePBX 16 / PBXact 16 (CentOS 7)
 
@@ -147,12 +185,13 @@ apt update
 apt install -y git
 ```
 
-Then run the following commands as root:
+Then run the following commands as root to install the current development
+branch explicitly:
 
 ```sh
 cd
 cd /var/www/html/admin/modules
-git clone https://github.com/freepbxUK/registrationwatch.git registrationwatch
+git clone --branch 1-5-0_Dev --single-branch https://github.com/freepbxUK/registrationwatch.git registrationwatch
 cd /var/www/html/admin/modules/registrationwatch
 fwconsole ma install registrationwatch
 cd
@@ -160,7 +199,7 @@ fwconsole chown
 fwconsole reload
 ```
 
-### Option 4: Install from a local copy
+### Install from a local development copy
 
 Copy or symlink a local `registrationwatch` directory into
 `/var/www/html/admin/modules/`, then:
@@ -177,25 +216,45 @@ The module appears under Reports > Registration Watch.
 
 ## Updating Registration Watch
 
-Do not uninstall when updating. Uninstalling removes Registration Watch tables,
-settings, watched registrations, status history, alert history, and
-repeat-alert state.
+**Do not uninstall Registration Watch before upgrading.** Uninstallation drops
+the module tables and removes settings, watched registrations, Status History,
+Alert History, repeat-alert state and webhook delivery history.
 
-### Option 1: Update from a signed `.tgz`
+### Upgrading an existing installation
 
-In **Admin > Module Admin**, upload the latest published signed
-Registration Watch archive (currently 1.4.4) and choose the normal module
-upgrade/install action. Do not uninstall the current module first. The unsigned
-1.5.0 development candidate is not a production upgrade package; use a signed
-`registrationwatch-1.5.0.tgz` only after the final 1.5.0 package is published.
-After Module Admin finishes, run `fwconsole chown` and `fwconsole reload`.
+For an existing Registration Watch 1.4.4 installation, upgrade to the eventual
+signed 1.5.0 release as follows:
 
-The install hook uses additive `CREATE TABLE IF NOT EXISTS` statements and
-`INSERT IGNORE` defaults. It does not reset extension monitoring choices,
-settings, registration records, history, or escalation state. The webhook
-queue is added as a new table; existing registrations are not newly monitored.
+1. Back up the FreePBX configuration and database. Retain a module-specific
+   Registration Watch backup if required by the site's operational policy.
+2. Once 1.5.0 is published, download the correctly signed
+   `registrationwatch-1.5.0.tgz` archive from the official release.
+3. In **Admin > Module Admin**, upload it and choose the normal module
+   upgrade/install action. **Do not uninstall first.**
+4. After Module Admin completes, run:
 
-### Option 2: Update from an unpacked module directory
+   ```sh
+   fwconsole chown
+   fwconsole reload
+   ```
+
+5. Follow [Verify the installation or update](#verify-the-installation-or-update).
+   Confirm version 1.5.0, a valid signature, both scheduled jobs, and continuity
+   of monitoring selections, settings and histories.
+
+Installation and upgrade use additive `CREATE TABLE IF NOT EXISTS` operations
+and `INSERT IGNORE` defaults. Existing extension monitoring choices, settings,
+registration records, Status History, Alert History and repeat/escalation
+state are retained. Existing registrations are not automatically newly
+monitored. The 1.5.0 upgrade introduces the webhook queue; published 1.4.4
+installations do not have that development queue.
+
+When upgrading an earlier 1.5.0 development build, outstanding `pending` or
+`processing` webhook rows without a verifiable original destination fingerprint
+are suppressed rather than bound to potentially changed current destination
+settings. Completed webhook delivery history is preserved.
+
+### Update from an unpacked development module directory
 
 Replace the module files in `/var/www/html/admin/modules/registrationwatch/`, then:
 
@@ -207,13 +266,20 @@ fwconsole chown
 fwconsole reload
 ```
 
-### Option 3: Update from GitHub
+### Update stable source from GitHub
 
-After the first installation, fwconsole chown may cause Git to reject the module directory because it is owned by the FreePBX web user rather than root. Run the following commands as root:
+This procedure intentionally selects the repository's stable `main` branch. It
+is not an instruction for updating a 1.5.0 development checkout.
 
-**Warning:** `git reset --hard origin/main` discards uncommitted changes to
-tracked files in the module directory. Commit, back up, or otherwise preserve
-any local modifications before using this procedure.
+After the first installation, `fwconsole chown` may cause Git to reject the
+module directory because it is owned by the FreePBX web user rather than root.
+Run the following commands as root.
+
+**Danger:** `git reset --hard origin/main` discards uncommitted changes to
+tracked files and makes the working tree match the stable remote-tracking
+branch. Commit, back up, or otherwise preserve any local changes before using
+this procedure. Do not run it when the intended source is a development
+branch.
 
 ```sh
 cd
@@ -230,7 +296,7 @@ fwconsole chown
 fwconsole reload
 ```
 
-### Option 4: Update from a local copy
+### Update from a local development copy
 
 Re-copy or re-link your local `registrationwatch` directory, then:
 
@@ -242,10 +308,7 @@ fwconsole chown
 fwconsole reload
 ```
 
-After updating, open Reports > Registration Watch and confirm that existing watched
-registrations, settings, and history are still present.
-
-### Verify the update
+### Verify the installation or update
 
 After any update, confirm that the installed module and its files report the
 expected version before investigating signature state or other update problems.
@@ -253,23 +316,51 @@ expected version before investigating signature state or other update problems.
 ```sh
 fwconsole ma list | grep -i registrationwatch
 grep -m1 '<version>' /var/www/html/admin/modules/registrationwatch/module.xml
+fwconsole job --list | grep -i registrationwatch
 ```
 
-If either command does not report the expected version, the module has not
+The version commands must report the release selected for installation:
+
+```text
+1.4.4: registrationwatch :: monitor
+1.5.0: registrationwatch :: monitor and registrationwatch :: webhooks
+```
+
+For the current stable 1.4.4 release, expect the monitoring job only. For the
+eventual signed 1.5.0 release, expect both jobs above; the separate webhook
+delivery job is introduced in 1.5.0.
+
+In **Admin > Module Admin**, confirm the module identity, expected version and
+valid signature status. Then open **Reports > Registration Watch** and verify:
+
+* previously monitored extensions remain monitored;
+* existing settings remain configured;
+* Status History and Alert History remain available;
+* live registration monitoring continues to update;
+* configured webhook destinations and existing delivery history remain
+  accessible to a full administrator;
+* email alerts retain the existing sender, recipients and notification
+  settings; and
+* a test or scheduled job executes without a Registration Watch error.
+
+A successful job invocation proves only that the local job completed. It does
+not prove that an external mail relay or webhook endpoint accepted delivery.
+
+If the version commands do not report the expected version, the module has not
 updated successfully. Correct the update source or module directory first, then
 rerun the update before troubleshooting signing or signature verification.
 
-### If the GitHub update did not complete
+### If the stable GitHub update did not complete
 
 If the module.xml command still reports an older version, the source update did
 not complete. An unusual dirty or local Git working-directory condition, such as
 a local file named `FETCH_HEAD`, can make `git reset --hard FETCH_HEAD`
-ambiguous. The documented procedure uses `git reset --hard origin/main` to avoid
-that ambiguity.
+ambiguous. The documented procedure uses `git reset --hard origin/main` to
+select the stable branch and avoid that ambiguity.
 
-Rerun the documented GitHub update and verify the version again. Do not proceed
-to signature troubleshooting until module.xml reports the version you intended
-to install.
+Rerun the documented stable-source update and verify the version again. This
+procedure is not for a 1.5.0 development branch. Do not proceed to signature
+troubleshooting until `module.xml` reports the version you intended to install.
 
 ## Native update discovery
 
@@ -316,20 +407,32 @@ publishing or deploying an update.
 
 The package builder stages an explicit production-file list in an isolated
 directory named `registrationwatch/`. It excludes Git metadata, tests,
-packaging scripts, temporary files, and the checked-in 1.4.4 signature. Tar
+packaging scripts, temporary files, and any obsolete 1.4.4 signature. Tar
 ownership, timestamps, file ordering, and gzip timestamps are normalized so
 repeated builds from identical files are byte-for-byte reproducible.
 
-Build an unsigned review package:
+Build the standard unsigned development package in the repository root:
 
 ```sh
-php scripts/package.php --unsigned --output-dir=dist
+php scripts/package.php --unsigned --output-dir=. --checksum
 ```
 
-This creates `dist/registrationwatch-1.5.0-unsigned.tgz`. It is not a signed
-release and must not be published as production-ready.
+This creates `registrationwatch-1.5.0-unsigned.tgz` and
+`registrationwatch-1.5.0-unsigned.tgz.sha256` alongside `README.md` and
+`module.xml`. They are intentionally maintained in the repository root. The
+archive is not signed, is for structural verification and controlled testing,
+and must not be published as production-ready.
 
-The production signing sequence is:
+Verify the root-level archive:
+
+```sh
+sha256sum --check registrationwatch-1.5.0-unsigned.tgz.sha256
+```
+
+The production release sequence is
+**Finalise → Stage → Sign staged files → Freeze → Package the identical staged
+files → Extract → Independently verify signature and integrity → Generate
+SHA-256**:
 
 ```sh
 php scripts/package.php --stage --stage-dir=/safe/path/registrationwatch
@@ -339,14 +442,15 @@ php scripts/package.php --signed --stage-dir=/safe/path/registrationwatch --outp
 ```
 
 The authorised signer must generate a new signature for that staged file set
-using the established FreePBX Module Signing v2 workflow and developer
-identity. Do not copy the 1.4.4 signature, generate replacement keys, or commit
-private signing material. Signed mode requires the existing public key,
+using the established FreePBX Module Signing v2 workflow and authorised
+FreePBX developer identity. Do not copy back the removed 1.4.4 signature,
+generate replacement keys, or commit private signing material. No production
+file may change after signing. Signed mode requires the existing public key,
 requires the stage to be read-only, and verifies the signed manifest before it
-archives the same directory. It then extracts the archive independently,
-verifies file coverage, hashes, and the extracted signature, and writes the
-`.sha256` file only after those checks succeed. The builder also rejects any
-staging/source mismatch and any staging change during archive construction.
+archives the same directory. It then independently extracts the completed
+archive and verifies file coverage, hashes and the extracted signature before
+writing the `.sha256` checksum. The builder also rejects staging/source
+mismatches and staging changes during archive construction.
 The manually dispatched GitHub Actions workflow creates only a clearly named
 unsigned review artifact; it has no release or publication step.
 
@@ -356,13 +460,18 @@ After publishing the signed package asset, generate the remote update metadata:
 php scripts/update-metadata.php --stage-dir=/safe/path/registrationwatch --output-dir=dist
 ```
 
-The generator fails if signing credentials are missing, the frozen stage is
+The resulting verified signed archive must be published as the appropriate
+versioned GitHub Release asset. The generator fails if signing credentials are
+missing, the frozen stage is
 unavailable, the published GitHub Release asset is unavailable or differs from
 the signed local package, or the new version regresses from the existing root
 `version.json`. It writes `dist/version.json` only after validation. Publish
 the release asset first; then review and place the generated `version.json` at
 the repository root so the configured feed starts advertising that available
-package. This command does not publish either artifact.
+package. Production signing, package publication and update metadata
+publication occur only after the required verification; the configured feed
+must never advertise an unavailable or unsigned package. This command does
+not publish either artifact.
 
 ## Webhooks
 
@@ -374,7 +483,7 @@ use it only when the endpoint and its URL logs are suitable for those values.
 Credentials in URL user-info and common credential-style query parameter names
 are rejected. Because arbitrary parameter names cannot be identified as secrets,
 never put credentials in any URL parameter; use encrypted custom headers.
-The serialized destination list is capped at 8,000,000 bytes and stored in a
+The serialised destination list is capped at 8,000,000 bytes and stored in a
 `MEDIUMTEXT` settings column; configured per-field and destination-count limits
 fit below that cap.
 
@@ -464,7 +573,7 @@ or restoring the encrypted configuration onto a PBX with a different
 credential, re-enter custom headers. Keep FreePBX configuration and database
 backups protected.
 
-### Testing and delivery behavior
+### Testing and delivery behaviour
 
 The **Test** action sends a clearly marked `registration.test` event using the
 selected destination's saved settings. It does not enqueue a monitoring event
@@ -554,7 +663,7 @@ cd /var/www/html/admin/modules/registrationwatch
 git branch -r
 ```
 
-Then rerun the normal stable update:
+Then, only when updating stable source, rerun:
 
 ```sh
 cd /var/www/html/admin/modules/registrationwatch
@@ -565,9 +674,11 @@ fwconsole chown
 fwconsole reload
 ```
 
-If `git fetch origin` fails, fix the Git checkout before running `fwconsole ma
-install`; otherwise it will install whatever older module files are already on
-disk. Then verify the installed version again:
+This command resets to `origin/main`, discards tracked local changes and is not
+an update instruction for the 1.5.0 development branch. If `git fetch origin`
+fails, fix the Git checkout before running `fwconsole ma install`; otherwise it
+will install whatever older module files are already on disk. Then verify the
+installed version again:
 
 ```sh
 fwconsole ma list | grep -i registrationwatch
@@ -674,13 +785,14 @@ For suspected security vulnerabilities, do not post exploit details publicly. Co
 
 ## Background Checks
 
-Registration Watch registers two separate FreePBX jobs from its install hook.
-The hook runs on installation and upgrade and uses stable module/job
-identifiers, so repeating the install does not create a second logical job:
+Registration Watch 1.4.4 registers the monitoring job. Registration Watch 1.5.0
+adds a second, separate webhook delivery job. Each install or upgrade hook uses
+stable module/job identifiers, so repeating installation does not create a
+second logical copy of an expected job:
 
 ```text
 registrationwatch :: monitor
-registrationwatch :: webhooks
+registrationwatch :: webhooks  # 1.5.0 and later
 ```
 
 `registrationwatch :: monitor` is implemented by
@@ -691,33 +803,35 @@ does not make webhook HTTP requests.
 `registrationwatch :: webhooks` is implemented by
 `\FreePBX\modules\Registrationwatch\WebhookJob`. It processes at most six
 queued webhook deliveries per run, stops after its 12-second pre-claim budget
-is exhausted, and handles retry scheduling and delivery history updates. Both
-jobs are scheduled once per minute by the FreePBX Job runner.
+is exhausted, and handles retry scheduling and delivery history updates. The
+expected jobs are scheduled once per minute by the FreePBX Job runner.
 
-Check that both jobs are registered:
+Check the jobs registered for the installed version:
 
 ```sh
 fwconsole job --list | grep -i registrationwatch
 ```
 
-The list should contain both identifiers above. To run either job manually,
-use its actual job ID from that list:
+For 1.4.4, expect only `registrationwatch :: monitor`. For 1.5.0, expect both
+identifiers above. To run an expected job manually, use its actual job ID from
+that list:
 
 ```text
 fwconsole job --run=<job_id> --force
 ```
 
-If either job is missing, rerun the module install/upgrade through Module Admin
-or `fwconsole ma install registrationwatch`, then check the FreePBX logs for a
-job-registration error and list the jobs again. If the webhook job is present
-but deliveries are not progressing, run that job using its listed ID, check
-FreePBX logs, and inspect **Recent webhook deliveries** in Registration Watch.
+If an expected job is missing, rerun the module install/upgrade through Module
+Admin or `fwconsole ma install registrationwatch`, then check the FreePBX logs
+for a job-registration error and list the jobs again. If the 1.5.0 webhook job
+is present but deliveries are not progressing, run that job using its listed
+ID, check FreePBX logs, and inspect **Recent webhook deliveries** in Registration
+Watch.
 The worker records delivery failures there; a successful job invocation does
 not by itself mean the remote endpoint accepted a delivery.
 
 The module does not install a daemon, systemd unit, AMI event listener, custom
-probe service, or SMS sender. Uninstallation removes both
-`registrationwatch :: monitor` and `registrationwatch :: webhooks`.
+probe service, or SMS sender. Uninstallation removes the jobs registered for
+the installed version.
 
 ## Data Model
 
@@ -927,7 +1041,7 @@ state changes, but suppresses eligible email and webhook notifications.
   check; a recovery does not cause a suppressed problem event to be replayed.
 * Resuming clears the snooze setting; it does not replay webhook rows already
   marked `suppressed` or resend email attempts already recorded as suppressed.
-  Pending webhook rows not yet processed remain subject to the worker behavior
+  Pending webhook rows not yet processed remain subject to the worker behaviour
   described above.
 
 ## User Interface
@@ -975,7 +1089,9 @@ FreePBX module access.
 * No maintenance windows yet.
 * No SMS alert delivery.
 * Native Module Admin update discovery is source-verified for FreePBX 16 and 17 but has not been tested on live installations. No `version.json` is published for this development checkout, so no release is currently advertised; see [Native update discovery](#native-update-discovery).
-* Configurable email subject/body templates are deferred; existing email content and transport behavior are unchanged.
+* Configurable email subject/body templates are deferred; existing email content and transport behaviour are unchanged.
+* Per-extension email recipient routing is deferred; the existing global
+  recipient list remains in effect.
 * Short flaps can be missed between reconciliation runs.
 * Email delivery depends on the PBX mail sender and relay setup.
 * The established email alert-history reservation model predates 1.5.0 and
@@ -1031,8 +1147,8 @@ php tests/update_metadata_contract.php
 Build and checksum the unsigned development archive:
 
 ```sh
-php scripts/package.php --unsigned --output-dir=dist --checksum
-sha256sum --check dist/registrationwatch-1.5.0-unsigned.tgz.sha256
+php scripts/package.php --unsigned --output-dir=. --checksum
+sha256sum --check registrationwatch-1.5.0-unsigned.tgz.sha256
 ```
 
 The package builder validates the staging file set, archive structure, and an
@@ -1045,7 +1161,7 @@ these tests make no external requests.
 ### Installed FreePBX verification
 
 Perform these checks on an actual FreePBX/PBXact 16 or 17 installation after
-installing an authorized signed package. Do not run development tests or
+installing an authorised signed package. Do not run development tests or
 packaging scripts from the installed module directory; they are not included
 in the installation archive.
 
@@ -1060,8 +1176,8 @@ In **Admin > Module Admin**, confirm the module identity, installed version,
 and signature verification status. A development unsigned archive is not a
 production installation artifact.
 
-Reload FreePBX, verify both registered jobs, and run each using the job ID
-reported by the list:
+Reload FreePBX, verify the jobs appropriate to the installed version, and run
+each registered job using its job ID:
 
 ```sh
 fwconsole reload
@@ -1069,22 +1185,24 @@ fwconsole job --list | grep -i registrationwatch
 fwconsole job --run=<job_id> --force
 ```
 
-Confirm that the list contains `registrationwatch :: monitor` and
-`registrationwatch :: webhooks`. Run the listed ID for each job. Verify that
-registration monitoring updates the Registration Watch page and Status
-History. As a full FreePBX administrator, send a webhook test from the Webhooks
-section and confirm the direct AJAX result. Test events are not persisted in
-Recent webhook deliveries. Before and after an upgrade, compare the existing
+For 1.4.4, confirm that `registrationwatch :: monitor` is present. For 1.5.0,
+confirm that both `registrationwatch :: monitor` and
+`registrationwatch :: webhooks` are present. Run the listed ID for each
+expected job. Verify that registration monitoring updates the Registration
+Watch page and Status History. When verifying 1.5.0 as a full FreePBX
+administrator, send a webhook test from the Webhooks section and confirm the
+direct AJAX result. Test events are not persisted in Recent webhook deliveries.
+Before and after an upgrade, compare the existing
 monitoring selections, settings,
 registrations, and notification history; upgrade without uninstalling.
 
 ## Uninstalling
 
-Uninstalling Registration Watch removes the `registrationwatch :: monitor`
-and `registrationwatch :: webhooks` jobs and drops all
-`registrationwatch_*` tables, including `registrationwatch_webhook_queue`.
-Back up first if you need Registration Watch settings, monitoring selections,
-registration records, notification history, or queued webhook history.
+Uninstalling Registration Watch removes the jobs registered for that installed
+version (`registrationwatch :: monitor`, plus `registrationwatch :: webhooks`
+for 1.5.0) and drops all `registrationwatch_*` tables. Back up first if you
+need Registration Watch settings, monitoring selections, registration records,
+notification history, or queued webhook history.
 
 ```sh
 fwconsole ma uninstall registrationwatch --force
@@ -1113,12 +1231,12 @@ delivery behaviour are preserved during upgrade.
 Adds a repeatable `.tgz` package builder with explicit production-file
 inclusion, deterministic archive metadata, a frozen signed staging workflow,
 independent extraction and signature/hash verification, structure checks, and
-post-verification checksums. The checked-in 1.4.4 signature is not reused; the
+post-verification checksums. The removed 1.4.4 signature is not reused; the
 local 1.5.0 development archive and manually dispatched CI artifact are
 explicitly unsigned and review-only. Native FreePBX 16/17 update discovery is
 configured, but the development build does not publish `version.json` or
 advertise a release. A production 1.5.0 release still requires live FreePBX
-testing, authorized signing, and publication of the signed package and update
+testing, authorised signing, and publication of the signed package and update
 metadata. Email subject/body templating is deferred.
 
 ### 1.4.4, patch release, 15 October 2026
@@ -1482,7 +1600,7 @@ This module has been developed with AI assistance for code generation, review, t
 Assisted-by: AGENT_NAME:MODEL_VERSION
 ```
 
-For example: `Assisted-by: GitHub-Copilot:gpt-5.6-sol`
+For example: `Assisted-by: GitHub-Copilot:mai-code-2:Medium-1M`
 
 The human contributor remains solely responsible for the contribution. AI tools must not be listed as co-authors.
 

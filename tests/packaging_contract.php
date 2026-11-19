@@ -143,7 +143,6 @@ try {
 		'Independent archive verification should detect altered extracted bytes.'
 	);
 
-	copy($root . '/module.sig', $stage . '/module.sig');
 	$signedCommand = escapeshellarg(PHP_BINARY)
 		. ' ' . escapeshellarg($builder)
 		. ' --signed --stage-dir=' . escapeshellarg($stage)
@@ -151,6 +150,14 @@ try {
 	exec($signedCommand, $signedOutput, $signedStatus);
 	package_assert($signedStatus !== 0, 'A missing, stale, or unavailable production signature must fail signed packaging safely.');
 	package_assert(!is_file($temporaryDirectory . '/registrationwatch-1.5.0.tgz'), 'Failed signed packaging must not leave a release-named archive.');
+
+	file_put_contents($stage . '/module.sig', "invalid isolated signature fixture\n");
+	exec($signedCommand, $invalidSignedOutput, $invalidSignedStatus);
+	package_assert(
+		$invalidSignedStatus !== 0,
+		'An invalid isolated signature fixture must fail signed packaging without relying on a repository signature.'
+	);
+	package_assert(!is_file($temporaryDirectory . '/registrationwatch-1.5.0.tgz'), 'Invalid signatures must not leave a release-named archive.');
 } finally {
 	packageRemoveTree($temporaryDirectory);
 }
