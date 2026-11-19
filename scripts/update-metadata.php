@@ -7,12 +7,19 @@ require_once __DIR__ . '/UpdateMetadata.php';
 $root = dirname(__DIR__);
 $outputDirectory = null;
 $previousPath = null;
+$stageDirectory = null;
 foreach ($argv as $argument) {
 	if (strpos($argument, '--output-dir=') === 0) {
 		$outputDirectory = substr($argument, strlen('--output-dir='));
 	} elseif (strpos($argument, '--previous=') === 0) {
 		$previousPath = substr($argument, strlen('--previous='));
+	} elseif (strpos($argument, '--stage-dir=') === 0) {
+		$stageDirectory = substr($argument, strlen('--stage-dir='));
 	}
+}
+if ($stageDirectory === null || $stageDirectory === '') {
+	fwrite(STDERR, "A frozen, signed --stage-dir=.../registrationwatch is required.\n");
+	exit(1);
 }
 
 if ($outputDirectory === null || $outputDirectory === '') {
@@ -46,6 +53,7 @@ $packageCommand = [
 	PHP_BINARY,
 	__DIR__ . '/package.php',
 	'--signed',
+	'--stage-dir=' . $stageDirectory,
 	'--output-dir=' . $outputDirectory,
 ];
 $pipes = [];

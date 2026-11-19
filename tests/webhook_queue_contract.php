@@ -39,6 +39,10 @@ class FreePBX {
 
 class WebhookQueueSQLite extends PDO {
 	public $failQueueSelect = false;
+	public $suppressOnDestinationLock = false;
+	public $suppressOnRecoveryCheck = false;
+	public $suppressionDeliveryId = 0;
+	public $onNextDriverAttribute;
 
 	public function prepare($query, $options = null): PDOStatement {
 		if ($this->failQueueSelect && strpos((string)$query, 'FROM registrationwatch_webhook_queue') !== false) {
@@ -51,11 +55,39 @@ class WebhookQueueSQLite extends PDO {
 			'ON CONFLICT(setting_key) DO UPDATE SET setting_value = excluded.setting_value, updated_at = excluded.updated_at',
 			$query
 		);
+		if ($this->suppressOnRecoveryCheck
+			&& strpos((string)$query, 'alert_type IN') !== false
+			&& strpos((string)$query, 'SELECT status') !== false) {
+			$this->suppressOnRecoveryCheck = false;
+			$this->exec(
+				"UPDATE registrationwatch_webhook_queue
+				SET status = 'suppressed', last_error = 'Destination changed during recovery deferral'
+				WHERE id = " . (int)$this->suppressionDeliveryId
+			);
+		}
 		$statement = parent::prepare($query, $options ?? []);
 		if ($statement === false) {
 			throw new RuntimeException('Unable to prepare webhook queue test SQL.');
 		}
 		return $statement;
+	}
+
+	public function getAttribute($attribute): mixed {
+		if ($attribute === PDO::ATTR_DRIVER_NAME && is_callable($this->onNextDriverAttribute)) {
+			$callback = $this->onNextDriverAttribute;
+			$this->onNextDriverAttribute = null;
+			$callback();
+		}
+		if ($attribute === PDO::ATTR_DRIVER_NAME && $this->suppressOnDestinationLock) {
+			$this->suppressOnDestinationLock = false;
+			$this->exec(
+				"UPDATE registrationwatch_webhook_queue
+				SET status = 'suppressed', last_error = 'Destination changed before lock acquisition'
+				WHERE id = " . (int)$this->suppressionDeliveryId
+			);
+			return 'mysql';
+		}
+		return parent::getAttribute($attribute);
 	}
 }
 
@@ -68,7 +100,18 @@ function webhook_queue_assert(bool $condition, string $message): void {
 $database = new WebhookQueueSQLite('sqlite::memory:');
 $database->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
 $database->exec('CREATE TABLE registrationwatch_settings (setting_key TEXT PRIMARY KEY, setting_value TEXT NOT NULL, updated_at TEXT)');
-$database->exec('CREATE TABLE registrationwatch_registrations (id INTEGER PRIMARY KEY, repeat_mode TEXT, enabled INTEGER NOT NULL)');
+$database->exec(
+	'CREATE TABLE registrationwatch_registrations (
+		id INTEGER PRIMARY KEY,
+		registration_key TEXT,
+		extension TEXT,
+		repeat_mode TEXT,
+		enabled INTEGER NOT NULL,
+		last_known_status TEXT,
+		contact_uri TEXT,
+		latency_ms REAL
+	)'
+);
 $database->exec(
 	'CREATE TABLE registrationwatch_status_history (
 		id INTEGER PRIMARY KEY,
@@ -103,6 +146,7 @@ $database->exec(
 		registration_id INTEGER NOT NULL,
 		history_id INTEGER NOT NULL,
 		incident_start_history_id INTEGER NOT NULL,
+		destination_fingerprint TEXT,
 		alert_type TEXT NOT NULL,
 		event_type TEXT NOT NULL,
 		payload TEXT NOT NULL,
@@ -115,6 +159,23 @@ $database->exec(
 		created_at TEXT NOT NULL,
 		updated_at TEXT NOT NULL,
 		UNIQUE (event_id, destination_id)
+	)'
+);
+$database->exec(
+	'CREATE TABLE registrationwatch_alert_escalation (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		registration_id INTEGER NOT NULL,
+		registration_key TEXT NOT NULL,
+		extension TEXT NOT NULL,
+		history_id INTEGER NOT NULL,
+		alert_type TEXT NOT NULL,
+		active_since TEXT NOT NULL,
+		last_alert_at TEXT,
+		alert_count INTEGER NOT NULL DEFAULT 0,
+		next_due_at TEXT NOT NULL,
+		repeat_mode TEXT NOT NULL,
+		created_at TEXT,
+		updated_at TEXT
 	)'
 );
 FreePBX::$database = $database;
@@ -162,6 +223,31 @@ $destinations = [
 		'headers_encrypted' => '',
 	],
 ];
+$fingerprintDestination = static function (array $destination): string {
+	return hash('sha256', json_encode([
+		'url' => (string)($destination['url'] ?? ''),
+		'method' => strtoupper((string)($destination['method'] ?? 'POST')),
+		'allow_private' => !empty($destination['allow_private']) ? 1 : 0,
+		'enabled' => !empty($destination['enabled']) ? 1 : 0,
+		'headers_encrypted' => (string)($destination['headers_encrypted'] ?? ''),
+	], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) ?: '');
+};
+$activeDestinationFingerprint = $fingerprintDestination($destinations[0]);
+$secondDestinationFingerprint = $fingerprintDestination($destinations[1]);
+$database->exec(
+	"CREATE TRIGGER registrationwatch_webhook_test_fingerprint
+	AFTER INSERT ON registrationwatch_webhook_queue
+	WHEN NEW.destination_fingerprint IS NULL
+	BEGIN
+		UPDATE registrationwatch_webhook_queue
+		SET destination_fingerprint = CASE NEW.destination_id
+			WHEN " . $database->quote($activeDestination) . " THEN " . $database->quote($activeDestinationFingerprint) . "
+			WHEN " . $database->quote($secondActiveDestination) . " THEN " . $database->quote($secondDestinationFingerprint) . "
+			ELSE NULL
+		END
+		WHERE id = NEW.id;
+	END"
+);
 $settings = [
 	'alert_enabled' => '0',
 	'alert_recipients' => '',
@@ -181,7 +267,13 @@ foreach ($settings as $key => $value) {
 $nowTimestamp = time();
 $problemAt = date('Y-m-d H:i:s', $nowTimestamp - 90);
 $recoveryAt = date('Y-m-d H:i:s', $nowTimestamp - 30);
-$database->exec("INSERT INTO registrationwatch_registrations (id, repeat_mode, enabled) VALUES (1, 'never', 1), (2, 'never', 0)");
+$database->exec(
+	"INSERT INTO registrationwatch_registrations
+		(id, registration_key, extension, repeat_mode, enabled, last_known_status)
+	VALUES
+		(1, '" . hash('sha256', '2001') . "', '2001', 'never', 1, 'Unreachable'),
+		(2, '" . hash('sha256', '2002') . "', '2002', 'never', 0, 'Unreachable')"
+);
 $historyInsert = $database->prepare(
 	'INSERT INTO registrationwatch_status_history
 		(id, registration_id, registration_key, extension, from_state, to_state, source, reason, created_at)
@@ -261,8 +353,8 @@ $firstWorkerStatus = $workerTestStatuses->fetchColumn();
 $workerTestStatuses->execute([':event_id' => $workerTestEvents[1]]);
 $secondWorkerStatus = $workerTestStatuses->fetchColumn();
 webhook_queue_assert(
-	$firstWorkerStatus === 'failed' && $secondWorkerStatus === 'pending',
-	'One webhook-worker invocation must process only one queued delivery; invalid local endpoints must fail without DNS or HTTP.'
+	$firstWorkerStatus === 'suppressed' && $secondWorkerStatus === 'suppressed',
+	'Deliveries bound to an old destination identity must be suppressed before invalid replacement transport is attempted.'
 );
 $database->prepare(
 	'DELETE FROM registrationwatch_webhook_queue WHERE event_id IN (:first, :second)'
@@ -516,16 +608,127 @@ $unavailable = static function (): array {
 	return ['http_status' => 503];
 };
 $processQueue->invoke($module, date('Y-m-d H:i:s', $nowTimestamp), $resolver, $unavailable);
-$firstDelivery = $database->query('SELECT status, attempts, http_status FROM registrationwatch_webhook_queue WHERE history_id = 101')->fetch(PDO::FETCH_ASSOC);
-webhook_queue_assert($firstDelivery['status'] === 'pending' && (int)$firstDelivery['attempts'] === 1 && (int)$firstDelivery['http_status'] === 503, 'A transient HTTP error should be recorded and retried.');
+$firstDelivery = $database->query(
+	'SELECT status, attempts, http_status, next_attempt_at, updated_at
+	FROM registrationwatch_webhook_queue
+	WHERE history_id = 101'
+)->fetch(PDO::FETCH_ASSOC);
+webhook_queue_assert(
+	$firstDelivery['status'] === 'pending'
+		&& (int)$firstDelivery['attempts'] === 1
+		&& (int)$firstDelivery['http_status'] === 503
+		&& $firstDelivery['updated_at'] === date('Y-m-d H:i:s', $nowTimestamp)
+		&& $firstDelivery['next_attempt_at'] === date('Y-m-d H:i:s', $nowTimestamp + 60),
+	'A transient HTTP error should record the real update time and a 60-second retry time.'
+);
+$processQueue->invoke($module, date('Y-m-d H:i:s', $nowTimestamp + 59), $resolver, $unavailable, null, 6);
+$beforeFirstRetry = $database->query(
+	'SELECT attempts FROM registrationwatch_webhook_queue WHERE history_id = 101'
+)->fetchColumn();
+webhook_queue_assert((int)$beforeFirstRetry === 1, 'A delivery must not retry before the 60-second boundary.');
 
-$processQueue->invoke($module, date('Y-m-d H:i:s', $nowTimestamp + 61), $resolver, $unavailable);
-$processQueue->invoke($module, date('Y-m-d H:i:s', $nowTimestamp + 362), $resolver, $unavailable);
-$failedDelivery = $database->query('SELECT status, attempts FROM registrationwatch_webhook_queue WHERE history_id = 101')->fetch(PDO::FETCH_ASSOC);
-webhook_queue_assert($failedDelivery['status'] === 'failed' && (int)$failedDelivery['attempts'] === 3, 'Transient delivery retries should be bounded to three attempts.');
-$processQueue->invoke($module, date('Y-m-d H:i:s', $nowTimestamp + 362), $resolver, $unavailable);
+$processQueue->invoke($module, date('Y-m-d H:i:s', $nowTimestamp + 60), $resolver, $unavailable, null, 6);
+$secondDelivery = $database->query(
+	'SELECT status, attempts, next_attempt_at, updated_at
+	FROM registrationwatch_webhook_queue WHERE history_id = 101'
+)->fetch(PDO::FETCH_ASSOC);
+webhook_queue_assert(
+	$secondDelivery['status'] === 'pending'
+		&& (int)$secondDelivery['attempts'] === 2
+		&& $secondDelivery['updated_at'] === date('Y-m-d H:i:s', $nowTimestamp + 60)
+		&& $secondDelivery['next_attempt_at'] === date('Y-m-d H:i:s', $nowTimestamp + 360),
+	'A delivery should retry at the 60-second boundary and schedule 300 more seconds.'
+);
+$processQueue->invoke($module, date('Y-m-d H:i:s', $nowTimestamp + 359), $resolver, $unavailable, null, 6);
+$beforeSecondRetry = $database->query(
+	'SELECT attempts FROM registrationwatch_webhook_queue WHERE history_id = 101'
+)->fetchColumn();
+webhook_queue_assert((int)$beforeSecondRetry === 2, 'A delivery must not retry before the 300-second boundary.');
+$processQueue->invoke($module, date('Y-m-d H:i:s', $nowTimestamp + 360), $resolver, $unavailable, null, 6);
+$failedDelivery = $database->query(
+	'SELECT status, attempts FROM registrationwatch_webhook_queue WHERE history_id = 101'
+)->fetch(PDO::FETCH_ASSOC);
+webhook_queue_assert(
+	$failedDelivery['status'] === 'failed' && (int)$failedDelivery['attempts'] === 3,
+	'Transient delivery retries should be bounded to three attempts: ' . json_encode($failedDelivery)
+);
+$processQueue->invoke($module, date('Y-m-d H:i:s', $nowTimestamp + 420), $resolver, $unavailable);
 $recoveryDelivery = $database->query('SELECT status FROM registrationwatch_webhook_queue WHERE history_id = 102')->fetchColumn();
 webhook_queue_assert($recoveryDelivery === 'suppressed', 'Recovery must be suppressed when the corresponding problem notification was never delivered.');
+
+$database->prepare(
+	"INSERT INTO registrationwatch_alert_escalation
+		(registration_id, registration_key, extension, history_id, alert_type, active_since, last_alert_at,
+		 alert_count, next_due_at, repeat_mode, created_at, updated_at)
+	VALUES (1, :registration_key, '2001', 101, 'unreachable', :active_since, :last_alert_at,
+		6, :next_due_at, '5m', :created_at, :updated_at)"
+)->execute([
+	':registration_key' => hash('sha256', '2001'),
+	':active_since' => date('Y-m-d H:i:s', $nowTimestamp - 1800),
+	':last_alert_at' => date('Y-m-d H:i:s', $nowTimestamp - 300),
+	':next_due_at' => date('Y-m-d H:i:s', $nowTimestamp),
+	':created_at' => date('Y-m-d H:i:s', $nowTimestamp - 1800),
+	':updated_at' => date('Y-m-d H:i:s', $nowTimestamp - 300),
+]);
+$collectDueReminders = new ReflectionMethod($module, 'collectDueReminderAlerts');
+$collectDueReminders->setAccessible(true);
+$emailHistoryBeforeWebhookReminder = (int)$database->query(
+	'SELECT COUNT(*) FROM registrationwatch_alert_history'
+)->fetchColumn();
+$independentReminder = $collectDueReminders->invoke(
+	$module,
+	date('Y-m-d H:i:s', $nowTimestamp),
+	[
+		'alert_enabled' => '0',
+		'alert_on_unreachable' => '1',
+		'alert_on_not_registered' => '1',
+	],
+	[],
+	true,
+	static function () use ($nowTimestamp): array {
+		return [hash('sha256', '2001') => ['status' => 'Unreachable']];
+	}
+);
+webhook_queue_assert(
+	!$independentReminder['alerts']
+		&& count($independentReminder['webhook_reminders']) === 1
+		&& count($independentReminder['cycles']) === 1,
+	'Due webhook reminders must be collected independently while email alerts are disabled.'
+);
+$dispatchCollectedAlerts->invoke(
+	$module,
+	[],
+	$independentReminder['cycles'],
+	['storm_threshold' => '20'],
+	[],
+	date('Y-m-d H:i:s', $nowTimestamp),
+	$independentReminder['webhook_reminders']
+);
+$independentReminderEventId = hash('sha256', 'registrationwatch:101:unreachable:7');
+webhook_queue_assert(
+	(int)$database->query(
+		'SELECT COUNT(*) FROM registrationwatch_webhook_queue WHERE event_id = '
+		. $database->quote($independentReminderEventId)
+	)->fetchColumn() === 2
+	&& (int)$database->query('SELECT COUNT(*) FROM registrationwatch_alert_history')->fetchColumn()
+		=== $emailHistoryBeforeWebhookReminder,
+	'Webhook-only repeat notifications must be queued for every enabled destination without generating email history.'
+);
+$independentReminderPayload = json_decode(
+	$database->query(
+		'SELECT payload FROM registrationwatch_webhook_queue WHERE event_id = '
+		. $database->quote($independentReminderEventId) . ' ORDER BY id ASC LIMIT 1'
+	)->fetchColumn(),
+	true
+);
+webhook_queue_assert(
+	$independentReminderPayload['previous_status'] === 'Reachable'
+		&& $independentReminderPayload['current_status'] === 'Unreachable'
+		&& $independentReminderPayload['event_id'] === $independentReminderEventId,
+	'Webhook reminder payloads should preserve the original transition and current reminder status.'
+);
+$database->prepare("UPDATE registrationwatch_webhook_queue SET status = 'suppressed' WHERE event_id = :event_id")
+	->execute([':event_id' => $independentReminderEventId]);
 
 $interruptedInsert = $database->prepare(
 	"INSERT INTO registrationwatch_webhook_queue
@@ -776,5 +979,662 @@ webhook_queue_assert(
 );
 $database->prepare('DELETE FROM registrationwatch_webhook_queue WHERE event_id IN (:first, :second)')
 	->execute([':first' => $slowEventIds[0], ':second' => $slowEventIds[1]]);
+
+$batchEventPrefix = hash('sha256', 'webhook-batch-limit');
+$batchInsert = $database->prepare(
+	"INSERT INTO registrationwatch_webhook_queue
+		(destination_id, event_id, registration_id, history_id, incident_start_history_id, alert_type, event_type, payload,
+		 status, attempts, next_attempt_at, created_at, updated_at)
+	VALUES (:destination_id, :event_id, 1, :history_id, :history_id, 'unreachable',
+		'registration.unreachable', '{}', 'pending', 0, :now, :now, :now)"
+);
+for ($index = 0; $index < 8; $index++) {
+	$batchInsert->execute([
+		':destination_id' => $activeDestination,
+		':event_id' => hash('sha256', $batchEventPrefix . ':' . $index),
+		':history_id' => 1001 + $index,
+		':now' => $slowDeliveryNow,
+	]);
+}
+$batchTransportCalls = 0;
+$processQueue->invoke(
+	$module,
+	$slowDeliveryNow,
+	$resolver,
+	static function () use (&$batchTransportCalls): array {
+		$batchTransportCalls++;
+		return [
+			'http_status' => $batchTransportCalls === 2 ? 503 : ($batchTransportCalls === 3 ? 400 : 200),
+		];
+	},
+	static function (): float {
+		return 0.0;
+	},
+	6
+);
+webhook_queue_assert(
+	$batchTransportCalls === 6,
+	'The worker must enforce its six-delivery batch limit without exceeding the configured test batch.'
+);
+$batchDelivered = 0;
+$batchPending = 0;
+$batchFailed = 0;
+for ($index = 0; $index < 8; $index++) {
+	$batchStatus = $database->query(
+		'SELECT status FROM registrationwatch_webhook_queue WHERE event_id = '
+		. $database->quote(hash('sha256', $batchEventPrefix . ':' . $index))
+	)->fetchColumn();
+	$batchDelivered += $batchStatus === 'delivered' ? 1 : 0;
+	$batchPending += $batchStatus === 'pending' ? 1 : 0;
+	$batchFailed += $batchStatus === 'failed' ? 1 : 0;
+}
+webhook_queue_assert(
+	$batchDelivered === 4 && $batchPending === 3 && $batchFailed === 1,
+	'A partial-failure batch must record each outcome, retain one retry, and continue leaving backlog for later runs.'
+);
+$database->exec("UPDATE registrationwatch_webhook_queue SET status = 'suppressed'
+	WHERE history_id BETWEEN 1001 AND 1008");
+
+$budgetEvents = [];
+for ($index = 0; $index < 2; $index++) {
+	$eventId = hash('sha256', 'webhook-budget:' . $index);
+	$budgetEvents[] = $eventId;
+	$batchInsert->execute([
+		':destination_id' => $activeDestination,
+		':event_id' => $eventId,
+		':history_id' => 1101 + $index,
+		':now' => $slowDeliveryNow,
+	]);
+}
+$budgetClockCalls = 0;
+$budgetTransportCalls = 0;
+$processQueue->invoke(
+	$module,
+	$slowDeliveryNow,
+	$resolver,
+	static function () use (&$budgetTransportCalls): array {
+		$budgetTransportCalls++;
+		return ['http_status' => 200];
+	},
+	static function () use (&$budgetClockCalls): float {
+		$budgetClockCalls++;
+		return $budgetClockCalls <= 2 ? 0.0 : 13.0;
+	},
+	6
+);
+webhook_queue_assert(
+	$budgetTransportCalls === 1,
+	'The worker must stop before another claim when its total execution-time budget is exhausted.'
+);
+$budgetStatuses = [];
+foreach ($budgetEvents as $eventId) {
+	$stmt = $database->prepare('SELECT status FROM registrationwatch_webhook_queue WHERE event_id = :event_id');
+	$stmt->execute([':event_id' => $eventId]);
+	$budgetStatuses[] = $stmt->fetchColumn();
+}
+webhook_queue_assert(
+	$budgetStatuses === ['delivered', 'pending'],
+	'Execution-budget termination must leave unprocessed deliveries pending for the next worker run.'
+);
+
+$database->exec("UPDATE registrationwatch_webhook_queue SET status = 'suppressed'
+	WHERE status IN ('pending', 'processing')");
+$timingEvent = hash('sha256', 'webhook-completion-retry-time');
+$timingNow = date('Y-m-d H:i:s', $nowTimestamp + 1000);
+$destinationPendingInsert = $database->prepare(
+	"INSERT INTO registrationwatch_webhook_queue
+		(destination_id, event_id, registration_id, history_id, incident_start_history_id, alert_type, event_type, payload,
+		 status, attempts, next_attempt_at, created_at, updated_at)
+	VALUES (:destination_id, :event_id, 1, 1250, 1250, 'unreachable',
+		'registration.unreachable', '{}', 'pending', 0, :now, :now, :now)"
+);
+$destinationPendingInsert->execute([
+	':destination_id' => $activeDestination,
+	':event_id' => $timingEvent,
+	':now' => $timingNow,
+]);
+$timingElapsed = 0.0;
+$timingTransportCalls = 0;
+$processQueue->invoke(
+	$module,
+	$timingNow,
+	$resolver,
+	static function () use (&$timingElapsed, &$timingTransportCalls): array {
+		$timingTransportCalls++;
+		$timingElapsed = 7.0;
+		return ['http_status' => 503];
+	},
+	static function () use (&$timingElapsed): float {
+		return $timingElapsed;
+	},
+	1
+);
+$timingState = $database->query(
+	'SELECT status, attempts, updated_at, next_attempt_at FROM registrationwatch_webhook_queue
+	WHERE event_id = ' . $database->quote($timingEvent)
+)->fetch(PDO::FETCH_ASSOC);
+webhook_queue_assert(
+	$timingTransportCalls === 1
+		&& $timingState['status'] === 'pending'
+		&& (int)$timingState['attempts'] === 1
+		&& $timingState['updated_at'] === date('Y-m-d H:i:s', strtotime($timingNow) + 7)
+		&& $timingState['next_attempt_at'] === date('Y-m-d H:i:s', strtotime($timingNow) + 67),
+	'A retry must be scheduled 60 seconds after the actual failed delivery completes.'
+);
+$processQueue->invoke(
+	$module,
+	date('Y-m-d H:i:s', strtotime($timingNow) + 66),
+	$resolver,
+	$unavailable,
+	static function (): float {
+		return 0.0;
+	},
+	1
+);
+$timingBeforeBoundary = (int)$database->query(
+	'SELECT attempts FROM registrationwatch_webhook_queue WHERE event_id = '
+	. $database->quote($timingEvent)
+)->fetchColumn();
+webhook_queue_assert(
+	$timingBeforeBoundary === 1,
+	'A slow failed request must not become retryable prematurely before completion plus 60 seconds.'
+);
+
+$destinationChangeEvent = hash('sha256', 'webhook-destination-name-only');
+$destinationPendingInsert->execute([
+	':destination_id' => $activeDestination,
+	':event_id' => $destinationChangeEvent,
+	':now' => $slowDeliveryNow,
+]);
+$destinationToken = 'destination-change-contract-token';
+$_SESSION = [
+	'registrationwatch_csrf_token' => $destinationToken,
+	'AMP_user' => new class {
+		public function checkSection(string $section): bool {
+			return $section === '*';
+		}
+	},
+];
+$_REQUEST = [
+	'command' => 'savewebhook',
+	'token' => $destinationToken,
+	'destination_id' => $activeDestination,
+	'name' => 'Renamed active endpoint',
+	'url' => 'https://hooks.example.invalid/events',
+	'method' => 'POST',
+	'enabled' => '1',
+	'allow_private' => '0',
+	'payload_template' => '',
+	'custom_headers_json' => '',
+];
+$renamedResponse = $module->ajaxHandler();
+webhook_queue_assert(
+	$renamedResponse['status'] === true
+		&& $database->query(
+			'SELECT status FROM registrationwatch_webhook_queue WHERE event_id = '
+			. $database->quote($destinationChangeEvent)
+		)->fetchColumn() === 'pending',
+	'An unrelated destination-name change must preserve queued deliveries.'
+);
+$_REQUEST['url'] = 'https://replacement.example.invalid/events';
+$reroutedResponse = $module->ajaxHandler();
+$reroutedDelivery = $database->query(
+	"SELECT status, last_error FROM registrationwatch_webhook_queue WHERE event_id = "
+	. $database->quote($destinationChangeEvent)
+)->fetch(PDO::FETCH_ASSOC);
+webhook_queue_assert(
+	$reroutedResponse['status'] === true
+		&& $reroutedDelivery['status'] === 'suppressed'
+		&& strpos((string)$reroutedDelivery['last_error'], 'configuration changed') !== false,
+	'A material destination change must suppress pending deliveries before they can reach the new endpoint.'
+);
+unset($_SESSION, $_REQUEST);
+
+$producerRaceDestinations = $destinations;
+$producerRaceDestinations[0]['url'] = 'https://old-producer.example.invalid/events';
+$database->prepare(
+	"UPDATE registrationwatch_settings
+	SET setting_value = :value
+	WHERE setting_key = 'webhook_destinations'"
+)->execute([':value' => json_encode($producerRaceDestinations)]);
+$producerRaceTransition = [
+	'id' => 1251,
+	'registration_id' => 1,
+	'registration_key' => hash('sha256', '2001'),
+	'extension' => '2001',
+	'from_state' => 'Reachable',
+	'to_state' => 'Unreachable',
+	'created_at' => date('Y-m-d H:i:s', $nowTimestamp),
+];
+$producerRaceEventId = hash('sha256', 'registrationwatch:1251:unreachable:0');
+$queueEvent->invoke(
+	$module,
+	$producerRaceTransition,
+	'unreachable',
+	0,
+	1251,
+	static function () use ($database, $activeDestination, $producerRaceDestinations): void {
+		$replacement = $producerRaceDestinations;
+		$replacement[0]['url'] = 'https://replacement-producer.example.invalid/events';
+		$database->prepare(
+			"UPDATE registrationwatch_settings
+			SET setting_value = :value
+			WHERE setting_key = 'webhook_destinations'"
+		)->execute([':value' => json_encode($replacement)]);
+		$database->prepare(
+			"UPDATE registrationwatch_webhook_queue
+			SET status = 'suppressed', last_error = 'Destination changed during producer interleave'
+			WHERE destination_id = :destination_id
+				AND status IN ('pending', 'processing')"
+		)->execute([':destination_id' => $activeDestination]);
+	}
+);
+$producerRaceRow = $database->query(
+	'SELECT id, destination_fingerprint, status FROM registrationwatch_webhook_queue WHERE destination_id = '
+	. $database->quote($activeDestination)
+	. ' AND event_id = ' . $database->quote($producerRaceEventId)
+)->fetch(PDO::FETCH_ASSOC);
+webhook_queue_assert(
+	$producerRaceRow['status'] === 'pending'
+		&& strlen((string)$producerRaceRow['destination_fingerprint']) === 64,
+	'A producer must bind a queued row to the configuration it read before a deterministic edit interleave.'
+);
+$database->prepare(
+	"UPDATE registrationwatch_webhook_queue
+	SET status = 'suppressed'
+	WHERE event_id <> :event_id
+		AND status IN ('pending', 'processing')"
+)->execute([':event_id' => $producerRaceEventId]);
+$producerRaceCalls = [];
+$producerProcessNow = date('Y-m-d H:i:s');
+$processQueue->invoke(
+	$module,
+	$producerProcessNow,
+	$resolver,
+	static function ($url) use (&$producerRaceCalls): array {
+		$producerRaceCalls[] = $url;
+		return ['http_status' => 200];
+	},
+	null,
+	6
+);
+$producerRaceState = $database->query(
+	'SELECT status, last_error FROM registrationwatch_webhook_queue WHERE event_id = '
+	. $database->quote($producerRaceEventId)
+)->fetch(PDO::FETCH_ASSOC);
+webhook_queue_assert(
+	$producerRaceState['status'] === 'suppressed'
+		&& strpos((string)$producerRaceState['last_error'], 'configuration changed') !== false
+		&& !array_filter($producerRaceCalls, static function (string $url): bool {
+			return strpos($url, 'replacement-producer.example.invalid') !== false;
+		}),
+	'A row queued under the old destination must be suppressed before reaching the replacement URL.'
+);
+
+$unchangedTransition = $producerRaceTransition;
+$unchangedTransition['id'] = 1252;
+$unchangedEventId = hash('sha256', 'registrationwatch:1252:unreachable:0');
+$queueEvent->invoke($module, $unchangedTransition, 'unreachable', 0, 1252);
+$unchangedCalls = 0;
+$processQueue->invoke(
+	$module,
+	date('Y-m-d H:i:s'),
+	$resolver,
+	static function () use (&$unchangedCalls): array {
+		$unchangedCalls++;
+		return ['http_status' => 200];
+	},
+	null,
+	6
+);
+webhook_queue_assert(
+	$unchangedCalls >= 1
+		&& $database->query(
+			'SELECT status FROM registrationwatch_webhook_queue WHERE destination_id = '
+			. $database->quote($activeDestination)
+			. ' AND event_id = ' . $database->quote($unchangedEventId)
+		)->fetchColumn() === 'delivered',
+	'Normal delivery must remain available when the destination identity is unchanged.'
+);
+
+$serializedDestinations = json_decode(
+	$database->query(
+		"SELECT setting_value FROM registrationwatch_settings WHERE setting_key = 'webhook_destinations'"
+	)->fetchColumn(),
+	true
+);
+foreach ($serializedDestinations as &$serializedDestination) {
+	if ((string)$serializedDestination['id'] === $secondActiveDestination) {
+		$serializedDestination['name'] = 'Second endpoint original name';
+	}
+}
+unset($serializedDestination);
+$database->prepare(
+	"UPDATE registrationwatch_settings SET setting_value = :value WHERE setting_key = 'webhook_destinations'"
+)->execute([':value' => json_encode($serializedDestinations)]);
+$serializedToken = 'serialized-config-contract-token';
+$_SESSION = [
+	'registrationwatch_csrf_token' => $serializedToken,
+	'AMP_user' => new class {
+		public function checkSection(string $section): bool {
+			return $section === '*';
+		}
+	},
+];
+$_REQUEST = [
+	'command' => 'savewebhook',
+	'token' => $serializedToken,
+	'destination_id' => $activeDestination,
+	'name' => 'Active endpoint serialized update',
+	'url' => 'https://replacement.example.invalid/events',
+	'method' => 'POST',
+	'enabled' => '1',
+	'allow_private' => '0',
+	'payload_template' => '',
+	'custom_headers_json' => '',
+];
+$database->onNextDriverAttribute = static function () use ($database, $secondActiveDestination): void {
+	$current = json_decode(
+		$database->query(
+			"SELECT setting_value FROM registrationwatch_settings WHERE setting_key = 'webhook_destinations'"
+		)->fetchColumn(),
+		true
+	);
+	foreach ($current as &$destination) {
+		if ((string)$destination['id'] === $secondActiveDestination) {
+			$destination['name'] = 'Concurrent second endpoint update';
+		}
+	}
+	unset($destination);
+	$database->prepare(
+		"UPDATE registrationwatch_settings SET setting_value = :value WHERE setting_key = 'webhook_destinations'"
+	)->execute([':value' => json_encode($current)]);
+};
+$serializedResponse = $module->ajaxHandler();
+$serializedSaved = json_decode(
+	$database->query(
+		"SELECT setting_value FROM registrationwatch_settings WHERE setting_key = 'webhook_destinations'"
+	)->fetchColumn(),
+	true
+);
+$serializedNames = [];
+foreach ($serializedSaved as $destination) {
+	$serializedNames[(string)$destination['id']] = (string)$destination['name'];
+}
+webhook_queue_assert(
+	$serializedResponse['status'] === true
+		&& $serializedNames[$activeDestination] === 'Active endpoint serialized update'
+		&& $serializedNames[$secondActiveDestination] === 'Concurrent second endpoint update',
+	'An edit interleaved at the configuration lock must reread and preserve another destination update.'
+);
+unset($_SESSION, $_REQUEST);
+
+$database->exec("UPDATE registrationwatch_webhook_queue
+	SET status = 'suppressed' WHERE status IN ('pending', 'processing')");
+$claimEvent = hash('sha256', 'webhook-conditional-claim');
+$destinationPendingInsert->execute([
+	':destination_id' => $activeDestination,
+	':event_id' => $claimEvent,
+	':now' => $slowDeliveryNow,
+]);
+$claimMethod = new ReflectionMethod($module, 'claimWebhookDelivery');
+$claimMethod->setAccessible(true);
+$firstClaim = $claimMethod->invoke($module, $slowDeliveryNow);
+$secondClaim = $claimMethod->invoke($module, $slowDeliveryNow);
+webhook_queue_assert(
+	is_array($firstClaim) && (int)$firstClaim['id'] > 0
+		&& (string)$firstClaim['event_id'] === $claimEvent
+		&& $secondClaim === null,
+	'Conditional queue claiming must prevent another worker from claiming the same processing row.'
+);
+
+$processClaimed = new ReflectionMethod($module, 'processClaimedWebhookDelivery');
+$processClaimed->setAccessible(true);
+$raceNow = date('Y-m-d H:i:s', $nowTimestamp + 2000);
+$raceInsert = $database->prepare(
+	"INSERT INTO registrationwatch_webhook_queue
+		(destination_id, event_id, registration_id, history_id, incident_start_history_id, alert_type, event_type, payload,
+		 status, attempts, next_attempt_at, created_at, updated_at)
+	VALUES (:destination_id, :event_id, 1, :history_id, :incident_start, :alert_type, :event_type, '{}',
+		'pending', 0, :due_at, :created_at, :updated_at)"
+);
+
+$database->exec("UPDATE registrationwatch_webhook_queue SET status = 'suppressed'
+	WHERE status IN ('pending', 'processing')");
+$lockRaceEvent = hash('sha256', 'webhook-suppressed-during-lock-failure');
+$raceInsert->execute([
+	':destination_id' => $activeDestination,
+	':event_id' => $lockRaceEvent,
+	':history_id' => 1301,
+	':incident_start' => 1301,
+	':alert_type' => 'unreachable',
+	':event_type' => 'registration.unreachable',
+	':due_at' => $raceNow,
+	':created_at' => $raceNow,
+	':updated_at' => $raceNow,
+]);
+$lockRaceClaim = $claimMethod->invoke($module, $raceNow);
+$database->suppressionDeliveryId = (int)$lockRaceClaim['id'];
+$database->suppressOnDestinationLock = true;
+$lockRaceTransportCalls = 0;
+$processClaimed->invoke(
+	$module,
+	$lockRaceClaim,
+	$raceNow,
+	$resolver,
+	static function () use (&$lockRaceTransportCalls): array {
+		$lockRaceTransportCalls++;
+		return ['http_status' => 200];
+	}
+);
+$lockRaceState = $database->query(
+	'SELECT status, last_error FROM registrationwatch_webhook_queue WHERE event_id = '
+	. $database->quote($lockRaceEvent)
+)->fetch(PDO::FETCH_ASSOC);
+webhook_queue_assert(
+	$lockRaceState['status'] === 'suppressed'
+		&& strpos((string)$lockRaceState['last_error'], 'before lock acquisition') !== false
+		&& $lockRaceTransportCalls === 0,
+	'Administrative suppression during destination-lock failure must survive stale deferral and prevent HTTP.'
+);
+
+$database->exec("UPDATE registrationwatch_webhook_queue SET status = 'suppressed'
+	WHERE status IN ('pending', 'processing')");
+$problemEvent = hash('sha256', 'webhook-recovery-problem-pending');
+$recoveryEvent = hash('sha256', 'webhook-recovery-suppression-race');
+$raceInsert->execute([
+	':destination_id' => $activeDestination,
+	':event_id' => $problemEvent,
+	':history_id' => 1401,
+	':incident_start' => 1401,
+	':alert_type' => 'unreachable',
+	':event_type' => 'registration.unreachable',
+	':due_at' => date('Y-m-d H:i:s', strtotime($raceNow) + 300),
+	':created_at' => $raceNow,
+	':updated_at' => $raceNow,
+]);
+$raceInsert->execute([
+	':destination_id' => $activeDestination,
+	':event_id' => $recoveryEvent,
+	':history_id' => 1402,
+	':incident_start' => 1401,
+	':alert_type' => 'recovery',
+	':event_type' => 'registration.registered',
+	':due_at' => $raceNow,
+	':created_at' => $raceNow,
+	':updated_at' => $raceNow,
+]);
+$recoveryClaim = $claimMethod->invoke($module, $raceNow);
+$database->suppressionDeliveryId = (int)$recoveryClaim['id'];
+$database->suppressOnRecoveryCheck = true;
+$recoveryRaceTransportCalls = 0;
+$processClaimed->invoke(
+	$module,
+	$recoveryClaim,
+	$raceNow,
+	$resolver,
+	static function () use (&$recoveryRaceTransportCalls): array {
+		$recoveryRaceTransportCalls++;
+		return ['http_status' => 200];
+	}
+);
+$recoveryRaceState = $database->query(
+	'SELECT status, last_error FROM registrationwatch_webhook_queue WHERE event_id = '
+	. $database->quote($recoveryEvent)
+)->fetch(PDO::FETCH_ASSOC);
+webhook_queue_assert(
+	$recoveryRaceState['status'] === 'suppressed'
+		&& strpos((string)$recoveryRaceState['last_error'], 'recovery deferral') !== false
+		&& $recoveryRaceTransportCalls === 0,
+	'Administrative suppression during recovery deferral must not be overwritten with pending.'
+);
+
+$database->exec("UPDATE registrationwatch_webhook_queue SET status = 'suppressed'
+	WHERE status IN ('pending', 'processing')");
+$normalProblemEvent = hash('sha256', 'webhook-normal-recovery-problem-pending');
+$normalRecoveryEvent = hash('sha256', 'webhook-normal-recovery-deferral');
+$raceInsert->execute([
+	':destination_id' => $activeDestination,
+	':event_id' => $normalProblemEvent,
+	':history_id' => 1501,
+	':incident_start' => 1501,
+	':alert_type' => 'unreachable',
+	':event_type' => 'registration.unreachable',
+	':due_at' => date('Y-m-d H:i:s', strtotime($raceNow) + 300),
+	':created_at' => $raceNow,
+	':updated_at' => $raceNow,
+]);
+$raceInsert->execute([
+	':destination_id' => $activeDestination,
+	':event_id' => $normalRecoveryEvent,
+	':history_id' => 1502,
+	':incident_start' => 1501,
+	':alert_type' => 'recovery',
+	':event_type' => 'registration.registered',
+	':due_at' => $raceNow,
+	':created_at' => $raceNow,
+	':updated_at' => $raceNow,
+]);
+$normalRecoveryClaim = $claimMethod->invoke($module, $raceNow);
+$processClaimed->invoke(
+	$module,
+	$normalRecoveryClaim,
+	$raceNow,
+	$resolver,
+	static function (): array {
+		throw new RuntimeException('A deferred recovery must not reach HTTP.');
+	}
+);
+$normalRecoveryState = $database->query(
+	'SELECT status, attempts, next_attempt_at FROM registrationwatch_webhook_queue WHERE event_id = '
+	. $database->quote($normalRecoveryEvent)
+)->fetch(PDO::FETCH_ASSOC);
+webhook_queue_assert(
+	$normalRecoveryState['status'] === 'pending'
+		&& (int)$normalRecoveryState['attempts'] === 0
+		&& $normalRecoveryState['next_attempt_at'] === date('Y-m-d H:i:s', strtotime($raceNow) + 60),
+	'Recovery deferral must continue normally when the claim is still processing.'
+);
+
+$database->exec("UPDATE registrationwatch_webhook_queue SET status = 'suppressed'
+	WHERE status IN ('pending', 'processing')");
+$originalDestinationConfiguration = json_encode($destinations, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+$database->prepare(
+	"UPDATE registrationwatch_settings SET setting_value = :value
+	WHERE setting_key = 'webhook_destinations'"
+)->execute([':value' => $originalDestinationConfiguration]);
+$exceptionRaceEvent = hash('sha256', 'webhook-suppressed-during-exception');
+$raceInsert->execute([
+	':destination_id' => $activeDestination,
+	':event_id' => $exceptionRaceEvent,
+	':history_id' => 1601,
+	':incident_start' => 1601,
+	':alert_type' => 'unreachable',
+	':event_type' => 'registration.unreachable',
+	':due_at' => $raceNow,
+	':created_at' => $raceNow,
+	':updated_at' => $raceNow,
+]);
+$exceptionClaim = $claimMethod->invoke($module, $raceNow);
+$exceptionRaceUrls = [];
+$processClaimed->invoke(
+	$module,
+	$exceptionClaim,
+	$raceNow,
+	$resolver,
+	static function ($url) use (&$exceptionRaceUrls, $database, $exceptionRaceEvent): array {
+		$exceptionRaceUrls[] = $url;
+		$stmt = $database->prepare(
+			"UPDATE registrationwatch_webhook_queue
+			SET status = 'suppressed', last_error = 'Destination changed during request'
+			WHERE event_id = :event_id"
+		);
+		$stmt->execute([':event_id' => $exceptionRaceEvent]);
+		throw new RuntimeException('Controlled post-request exception.');
+	}
+);
+$exceptionRaceState = $database->query(
+	'SELECT status, last_error FROM registrationwatch_webhook_queue WHERE event_id = '
+	. $database->quote($exceptionRaceEvent)
+)->fetch(PDO::FETCH_ASSOC);
+webhook_queue_assert(
+	$exceptionRaceState['status'] === 'suppressed'
+		&& strpos((string)$exceptionRaceState['last_error'], 'during request') !== false
+		&& count($exceptionRaceUrls) === 1
+		&& strpos($exceptionRaceUrls[0], 'hooks.example.invalid') !== false
+		&& strpos($exceptionRaceUrls[0], 'replacement.example.invalid') === false,
+	'Exception recovery must not resurrect a suppressed claim or redirect it to a replacement URL.'
+);
+
+$updateDelivery = new ReflectionMethod($module, 'updateWebhookDelivery');
+$updateDelivery->setAccessible(true);
+$database->exec("UPDATE registrationwatch_webhook_queue SET status = 'suppressed'
+	WHERE status IN ('pending', 'processing')");
+$generationRaceEvent = hash('sha256', 'webhook-processing-generation-race');
+$raceInsert->execute([
+	':destination_id' => $activeDestination,
+	':event_id' => $generationRaceEvent,
+	':history_id' => 1701,
+	':incident_start' => 1701,
+	':alert_type' => 'unreachable',
+	':event_type' => 'registration.unreachable',
+	':due_at' => $raceNow,
+	':created_at' => $raceNow,
+	':updated_at' => $raceNow,
+]);
+$database->prepare(
+	"UPDATE registrationwatch_webhook_queue
+	SET status = 'processing', attempts = 3, updated_at = :new_claim
+	WHERE event_id = :event_id"
+)->execute([
+	':new_claim' => date('Y-m-d H:i:s', strtotime($raceNow) + 20),
+	':event_id' => $generationRaceEvent,
+]);
+$staleGenerationUpdated = $updateDelivery->invoke(
+	$module,
+	(int)$database->query(
+		'SELECT id FROM registrationwatch_webhook_queue WHERE event_id = '
+		. $database->quote($generationRaceEvent)
+	)->fetchColumn(),
+	'pending',
+	503,
+	'Stale generation completion.',
+	date('Y-m-d H:i:s', strtotime($raceNow) + 20),
+	3,
+	date('Y-m-d H:i:s', strtotime($raceNow) + 320),
+	3,
+	$raceNow
+);
+$generationRaceState = $database->query(
+	'SELECT status, attempts, updated_at FROM registrationwatch_webhook_queue WHERE event_id = '
+	. $database->quote($generationRaceEvent)
+)->fetch(PDO::FETCH_ASSOC);
+webhook_queue_assert(
+	$staleGenerationUpdated === false
+		&& $generationRaceState['status'] === 'processing'
+		&& (int)$generationRaceState['attempts'] === 3
+		&& $generationRaceState['updated_at'] === date('Y-m-d H:i:s', strtotime($raceNow) + 20),
+	'A late worker from an earlier processing lease must not overwrite a newer claim with the same attempt count.'
+);
 
 echo "Webhook queue contract passed.\n";

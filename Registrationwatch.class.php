@@ -35,6 +35,9 @@ class Registrationwatch implements \BMO {
 	const REPEAT_DAILY_SECONDS = 86400;
 	const REPEAT_ESCALATING_BASE_SECONDS = 300;
 	const REPEAT_ESCALATING_CEILING_SECONDS = 86400;
+	const WEBHOOK_WORKER_BATCH_LIMIT = 6;
+	const WEBHOOK_WORKER_BUDGET_SECONDS = 12.0;
+	const WEBHOOK_WORKER_DELIVERY_BUDGET_SECONDS = 7.0;
 	const REPEAT_MODES = [
 		self::REPEAT_MODE_NEVER,
 		self::REPEAT_MODE_FIVE_MINUTES,
@@ -1045,37 +1048,13 @@ class Registrationwatch implements \BMO {
 			}
 		}
 
-		$destinations = $this->getWebhookDestinations();
-		$existing = null;
-		if ($id !== '') {
-			if (!preg_match('/^[a-f0-9]{32}$/', $id)) {
-				return ['status' => false, 'message' => _('Invalid webhook destination identifier.')];
-			}
-			foreach ($destinations as $destination) {
-				if ((string)$destination['id'] === $id) {
-					$existing = $destination;
-					break;
-				}
-			}
-			if ($existing === null) {
-				return ['status' => false, 'message' => _('The webhook destination no longer exists. Reload the page and try again.')];
-			}
-		} elseif (count($destinations) >= RegistrationwatchWebhook::MAX_DESTINATIONS) {
-			return ['status' => false, 'message' => _('A maximum of 20 webhook destinations is allowed.')];
-		} else {
-			try {
-				$id = bin2hex(random_bytes(16));
-			} catch (\Throwable $e) {
-				$this->logError('Unable to generate a webhook destination identifier.');
-				return ['status' => false, 'message' => _('Unable to create the webhook destination.')];
-			}
+		if ($id !== '' && !preg_match('/^[a-f0-9]{32}$/', $id)) {
+			return ['status' => false, 'message' => _('Invalid webhook destination identifier.')];
 		}
 
-		$headersEncrypted = (string)($existing['headers_encrypted'] ?? '');
 		$headersJson = isset($_REQUEST['custom_headers_json']) ? trim((string)$_REQUEST['custom_headers_json']) : '';
-		if (!empty($_REQUEST['clear_headers'])) {
-			$headersEncrypted = '';
-		} elseif ($headersJson !== '') {
+		$decodedHeaders = null;
+		if ($headersJson !== '' && empty($_REQUEST['clear_headers'])) {
 			$decodedHeaders = json_decode($headersJson, true);
 			if (!is_array($decodedHeaders) || json_last_error() !== JSON_ERROR_NONE || substr(ltrim($headersJson), 0, 1) !== '{') {
 				return ['status' => false, 'message' => _('Custom headers must be a valid JSON object of header names and values.')];
@@ -1085,43 +1064,98 @@ class Registrationwatch implements \BMO {
 			if ($headers === null) {
 				return ['status' => false, 'message' => _($headersError)];
 			}
-			$masterSecret = $this->getWebhookMasterSecret();
-			if ($headers && $masterSecret === '') {
-				return ['status' => false, 'message' => _('FreePBX database encryption settings are unavailable; custom authentication headers cannot be saved safely.')];
-			}
-			$headersEncrypted = $headers
-				? (RegistrationwatchWebhook::encryptHeaders($headers, $masterSecret) ?? '')
-				: '';
-			if ($headers && $headersEncrypted === '') {
-				return ['status' => false, 'message' => _('Unable to encrypt the custom authentication headers.')];
-			}
 		}
 
-		$record = [
-			'id' => $id,
-			'name' => $name,
-			'url' => $url,
-			'enabled' => $enabled ? 1 : 0,
-			'method' => $method,
-			'allow_private' => $allowPrivate ? 1 : 0,
-			'payload_template' => $template,
-			'headers_encrypted' => $headersEncrypted,
-		];
-		$replaced = false;
-		foreach ($destinations as $index => $destination) {
-			if ((string)$destination['id'] === $id) {
-				$destinations[$index] = $record;
-				$replaced = true;
-				break;
+		if (!$this->acquireWebhookConfigurationLock(10)) {
+			return ['status' => false, 'message' => _('Webhook configuration is currently being updated. Try again shortly.')];
+		}
+		$destinationLocked = false;
+		try {
+			$destinations = $this->getWebhookDestinations();
+			$existing = null;
+			if ($id !== '') {
+				foreach ($destinations as $destination) {
+					if ((string)$destination['id'] === $id) {
+						$existing = $destination;
+						break;
+					}
+				}
+				if ($existing === null) {
+					return ['status' => false, 'message' => _('The webhook destination no longer exists. Reload the page and try again.')];
+				}
+			} elseif (count($destinations) >= RegistrationwatchWebhook::MAX_DESTINATIONS) {
+				return ['status' => false, 'message' => _('A maximum of 20 webhook destinations is allowed.')];
+			} else {
+				try {
+					$id = bin2hex(random_bytes(16));
+				} catch (\Throwable $e) {
+					$this->logError('Unable to generate a webhook destination identifier.');
+					return ['status' => false, 'message' => _('Unable to create the webhook destination.')];
+				}
 			}
-		}
-		if (!$replaced) {
-			$destinations[] = $record;
-		}
 
-		$saveError = $this->saveWebhookDestinations($destinations);
-		if ($saveError !== null) {
-			return ['status' => false, 'message' => _($saveError)];
+			$destinationLocked = $this->acquireWebhookDestinationLock($id, 10);
+			if (!$destinationLocked) {
+				return ['status' => false, 'message' => _('The webhook destination is currently delivering. Try again shortly.')];
+			}
+
+			$headersEncrypted = (string)($existing['headers_encrypted'] ?? '');
+			if (!empty($_REQUEST['clear_headers'])) {
+				$headersEncrypted = '';
+			} elseif ($decodedHeaders !== null) {
+				$masterSecret = $this->getWebhookMasterSecret();
+				if ($decodedHeaders && $masterSecret === '') {
+					return ['status' => false, 'message' => _('FreePBX database encryption settings are unavailable; custom authentication headers cannot be saved safely.')];
+				}
+				$headersEncrypted = $decodedHeaders
+					? (RegistrationwatchWebhook::encryptHeaders($decodedHeaders, $masterSecret) ?? '')
+					: '';
+				if ($decodedHeaders && $headersEncrypted === '') {
+					return ['status' => false, 'message' => _('Unable to encrypt the custom authentication headers.')];
+				}
+			}
+
+			$record = [
+				'id' => $id,
+				'name' => $name,
+				'url' => $url,
+				'enabled' => $enabled ? 1 : 0,
+				'method' => $method,
+				'allow_private' => $allowPrivate ? 1 : 0,
+				'payload_template' => $template,
+				'headers_encrypted' => $headersEncrypted,
+			];
+			$replaced = false;
+			foreach ($destinations as $index => $destination) {
+				if ((string)$destination['id'] === $id) {
+					$destinations[$index] = $record;
+					$replaced = true;
+					break;
+				}
+			}
+			if (!$replaced) {
+				$destinations[] = $record;
+			}
+
+			$saveError = $this->saveWebhookDestinations($destinations);
+			$materialChange = $existing !== null && (
+				$this->webhookDestinationDeliveryFingerprint($existing)
+					!== $this->webhookDestinationDeliveryFingerprint($record)
+			);
+			if ($saveError === null && $materialChange) {
+				$this->suppressWebhookDeliveries(
+					$id,
+					'Destination configuration changed before delivery.'
+				);
+			}
+			if ($saveError !== null) {
+				return ['status' => false, 'message' => _($saveError)];
+			}
+		} finally {
+			if ($destinationLocked) {
+				$this->releaseWebhookDestinationLock($id);
+			}
+			$this->releaseWebhookConfigurationLock();
 		}
 		return [
 			'status' => true,
@@ -1135,29 +1169,35 @@ class Registrationwatch implements \BMO {
 		if (!preg_match('/^[a-f0-9]{32}$/', $id)) {
 			return ['status' => false, 'message' => _('Invalid webhook destination identifier.')];
 		}
-		$destinations = $this->getWebhookDestinations();
-		$remaining = array_values(array_filter($destinations, static function (array $destination) use ($id): bool {
-			return (string)($destination['id'] ?? '') !== $id;
-		}));
-		if (count($remaining) === count($destinations)) {
-			return ['status' => false, 'message' => _('The webhook destination no longer exists.')];
+		if (!$this->acquireWebhookConfigurationLock(10)) {
+			return ['status' => false, 'message' => _('Webhook configuration is currently being updated. Try again shortly.')];
 		}
-
-		$saveError = $this->saveWebhookDestinations($remaining);
-		if ($saveError !== null) {
-			return ['status' => false, 'message' => _($saveError)];
+		$destinationLocked = false;
+		try {
+			$destinations = $this->getWebhookDestinations();
+			$remaining = array_values(array_filter($destinations, static function (array $destination) use ($id): bool {
+				return (string)($destination['id'] ?? '') !== $id;
+			}));
+			if (count($remaining) === count($destinations)) {
+				return ['status' => false, 'message' => _('The webhook destination no longer exists.')];
+			}
+			$destinationLocked = $this->acquireWebhookDestinationLock($id, 10);
+			if (!$destinationLocked) {
+				return ['status' => false, 'message' => _('The webhook destination is currently delivering. Try again shortly.')];
+			}
+			$saveError = $this->saveWebhookDestinations($remaining);
+			if ($saveError === null) {
+				$this->suppressWebhookDeliveries($id, 'Destination removed before delivery.');
+			}
+			if ($saveError !== null) {
+				return ['status' => false, 'message' => _($saveError)];
+			}
+		} finally {
+			if ($destinationLocked) {
+				$this->releaseWebhookDestinationLock($id);
+			}
+			$this->releaseWebhookConfigurationLock();
 		}
-		$stmt = $this->db()->prepare(
-			"UPDATE registrationwatch_webhook_queue
-			SET status = 'suppressed', last_error = :error, updated_at = :updated_at
-			WHERE destination_id = :destination_id
-				AND status IN ('pending', 'processing')"
-		);
-		$stmt->execute([
-			':error' => 'Destination removed',
-			':updated_at' => $this->now(),
-			':destination_id' => $id,
-		]);
 		return [
 			'status' => true,
 			'message' => _('Webhook destination removed.'),
@@ -1246,6 +1286,77 @@ class Registrationwatch implements \BMO {
 		}
 		$this->setSetting('webhook_destinations', $encoded);
 		return null;
+	}
+
+	private function webhookDestinationDeliveryFingerprint(array $destination): string {
+		return hash('sha256', json_encode([
+			'url' => (string)($destination['url'] ?? ''),
+			'method' => strtoupper((string)($destination['method'] ?? 'POST')),
+			'allow_private' => !empty($destination['allow_private']) ? 1 : 0,
+			'enabled' => !empty($destination['enabled']) ? 1 : 0,
+			'headers_encrypted' => (string)($destination['headers_encrypted'] ?? ''),
+		], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) ?: '');
+	}
+
+	private function suppressWebhookDeliveries(string $destinationId, string $reason): void {
+		$stmt = $this->db()->prepare(
+			"UPDATE registrationwatch_webhook_queue
+			SET status = 'suppressed', last_error = :error, updated_at = :updated_at
+			WHERE destination_id = :destination_id
+				AND status IN ('pending', 'processing')"
+		);
+		$stmt->execute([
+			':error' => substr($reason, 0, 512),
+			':updated_at' => $this->now(),
+			':destination_id' => $destinationId,
+		]);
+	}
+
+	private function acquireWebhookDestinationLock(string $destinationId, int $timeoutSeconds): bool {
+		return $this->acquireWebhookAdvisoryLock('rw_hook_' . $destinationId, $timeoutSeconds);
+	}
+
+	private function releaseWebhookDestinationLock(string $destinationId): void {
+		$this->releaseWebhookAdvisoryLock('rw_hook_' . $destinationId);
+	}
+
+	private function acquireWebhookConfigurationLock(int $timeoutSeconds): bool {
+		return $this->acquireWebhookAdvisoryLock('rw_hook_config', $timeoutSeconds);
+	}
+
+	private function releaseWebhookConfigurationLock(): void {
+		$this->releaseWebhookAdvisoryLock('rw_hook_config');
+	}
+
+	private function acquireWebhookAdvisoryLock(string $lockName, int $timeoutSeconds): bool {
+		try {
+			$db = $this->db();
+			if ($db->getAttribute(\PDO::ATTR_DRIVER_NAME) !== 'mysql') {
+				return true;
+			}
+			$stmt = $db->query(
+				'SELECT GET_LOCK(' . $db->quote($lockName)
+				. ', ' . max(0, $timeoutSeconds) . ')'
+			);
+			return $stmt !== false && (int)$stmt->fetchColumn() === 1;
+		} catch (\Throwable $e) {
+			$this->logWarning('Webhook destination lock could not be acquired; the configuration/delivery race is deferred.');
+			return false;
+		}
+	}
+
+	private function releaseWebhookAdvisoryLock(string $lockName): void {
+		try {
+			$db = $this->db();
+			if ($db->getAttribute(\PDO::ATTR_DRIVER_NAME) !== 'mysql') {
+				return;
+			}
+			$db->query(
+				'SELECT RELEASE_LOCK(' . $db->quote($lockName) . ')'
+			);
+		} catch (\Throwable $e) {
+			$this->logWarning('Webhook destination lock could not be released explicitly; MySQL will release it with the connection.');
+		}
 	}
 
 	private function getWebhookDestination(string $id): ?array {
@@ -3842,11 +3953,18 @@ class Registrationwatch implements \BMO {
 				}
 			}
 
-			$due = $this->collectDueReminderAlerts($now, $settings, $recipients);
+			$due = $this->collectDueReminderAlerts($now, $settings, $recipients, $canSendWebhook);
 			$collectedAlerts = array_merge($collectedAlerts, $due['alerts']);
 			$reminderCycles = $due['cycles'];
 
-			$this->dispatchCollectedAlerts($collectedAlerts, $reminderCycles, $settings, $recipients, $now);
+			$this->dispatchCollectedAlerts(
+				$collectedAlerts,
+				$reminderCycles,
+				$settings,
+				$recipients,
+				$now,
+				$due['webhook_reminders']
+			);
 			$this->recordSuppressedRecoveryAudits($recoveryAuditCandidates, $now);
 		} catch (\Exception $e) {
 			$this->logError('Alert processing failed: ' . $e->getMessage());
@@ -3862,7 +3980,13 @@ class Registrationwatch implements \BMO {
 		return false;
 	}
 
-	private function queueWebhookEvent(array $transition, string $alertType, int $reminderN, int $incidentStartHistoryId): void {
+	private function queueWebhookEvent(
+		array $transition,
+		string $alertType,
+		int $reminderN,
+		int $incidentStartHistoryId,
+		?callable $afterDestinationRead = null
+	): void {
 		try {
 			$historyId = (int)($transition['id'] ?? 0);
 			$registrationId = (int)($transition['registration_id'] ?? 0);
@@ -3891,6 +4015,9 @@ class Registrationwatch implements \BMO {
 			$snoozed = $this->isMonitoringSnoozed();
 			$db = $this->db();
 			$destinations = $this->getWebhookDestinations();
+			if ($afterDestinationRead !== null) {
+				$afterDestinationRead($destinations);
+			}
 			$queueCount = (int)$db->query('SELECT COUNT(*) FROM registrationwatch_webhook_queue')->fetchColumn();
 			if ($queueCount >= 10000) {
 				$db->exec("DELETE FROM registrationwatch_webhook_queue
@@ -3955,10 +4082,12 @@ class Registrationwatch implements \BMO {
 				}
 				$stmt = $db->prepare(
 					'INSERT IGNORE INTO registrationwatch_webhook_queue
-						(destination_id, event_id, registration_id, history_id, incident_start_history_id, alert_type, event_type, payload,
+						(destination_id, event_id, registration_id, history_id, incident_start_history_id, destination_fingerprint,
+						 alert_type, event_type, payload,
 						 status, attempts, next_attempt_at, created_at, updated_at)
 					VALUES
-						(:destination_id, :event_id, :registration_id, :history_id, :incident_start_history_id, :alert_type, :event_type, :payload,
+						(:destination_id, :event_id, :registration_id, :history_id, :incident_start_history_id, :destination_fingerprint,
+						 :alert_type, :event_type, :payload,
 						 :status, 0, :next_attempt_at, :created_at, :updated_at)'
 				);
 				$stmt->execute([
@@ -3967,6 +4096,7 @@ class Registrationwatch implements \BMO {
 					':registration_id' => $registrationId,
 					':history_id' => $historyId,
 					':incident_start_history_id' => max(0, $incidentStartHistoryId),
+					':destination_fingerprint' => $this->webhookDestinationDeliveryFingerprint($destination),
 					':alert_type' => $alertType,
 					':event_type' => $eventType,
 					':payload' => $json,
@@ -4006,7 +4136,48 @@ class Registrationwatch implements \BMO {
 		return is_array($row) ? $row : null;
 	}
 
-	private function processWebhookQueue(string $now, ?callable $resolver = null, ?callable $transport = null): void {
+	private function processWebhookQueue(
+		string $now,
+		?callable $resolver = null,
+		?callable $transport = null,
+		?callable $clock = null,
+		?int $batchLimit = null
+	): void {
+		$clock = $clock ?? static function (): float {
+			return hrtime(true) / 1000000000;
+		};
+		$startedAt = $clock();
+		$processed = 0;
+		$batchLimit = $batchLimit ?? 1;
+		$batchLimit = min(self::WEBHOOK_WORKER_BATCH_LIMIT, max(1, $batchLimit));
+		$claimBudgetSeconds = self::WEBHOOK_WORKER_BUDGET_SECONDS
+			- self::WEBHOOK_WORKER_DELIVERY_BUDGET_SECONDS;
+		while ($processed < $batchLimit
+			&& ($clock() - $startedAt) < $claimBudgetSeconds) {
+			$claimed = $this->claimWebhookDelivery($now);
+			if ($claimed === null) {
+				$this->pruneCompletedWebhookDeliveries();
+				break;
+			}
+			if (!$claimed) {
+				continue;
+			}
+			$processed++;
+			$completionTime = static function () use ($now, $startedAt, $clock): string {
+				$elapsedSeconds = max(0, (int)floor($clock() - $startedAt));
+				return date('Y-m-d H:i:s', strtotime($now) + $elapsedSeconds);
+			};
+			$this->processClaimedWebhookDelivery(
+				$claimed,
+				$now,
+				$resolver,
+				$transport,
+				$completionTime
+			);
+		}
+	}
+
+	private function claimWebhookDelivery(string $now): ?array {
 		$db = null;
 		try {
 			$db = $this->db();
@@ -4018,7 +4189,9 @@ class Registrationwatch implements \BMO {
 				FROM registrationwatch_webhook_queue
 				WHERE (status = 'pending' AND next_attempt_at <= :now)
 					OR (status = 'processing' AND updated_at <= :stale_processing)
-				ORDER BY id ASC
+				ORDER BY
+					CASE WHEN status = 'pending' THEN next_attempt_at ELSE updated_at END,
+					id ASC
 				LIMIT 1" . $lockClause
 			);
 			$stmt->execute([
@@ -4028,15 +4201,76 @@ class Registrationwatch implements \BMO {
 			$delivery = $stmt->fetch(\PDO::FETCH_ASSOC);
 			if (!is_array($delivery)) {
 				$db->commit();
-				$db->exec("DELETE FROM registrationwatch_webhook_queue
-					WHERE status IN ('delivered', 'failed', 'suppressed')
-						AND created_at < DATE_SUB(NOW(), INTERVAL 30 DAY)");
-				return;
+				return null;
 			}
 
-			$deliveryId = (int)$delivery['id'];
 			$storedAttempts = (int)$delivery['attempts'];
-			if ((string)$delivery['status'] === 'processing' && $storedAttempts >= 3) {
+			$attempts = (string)$delivery['status'] === 'processing' && $storedAttempts >= 3
+				? $storedAttempts
+				: $storedAttempts + 1;
+			$mark = $db->prepare(
+				"UPDATE registrationwatch_webhook_queue
+				SET status = 'processing', attempts = :attempts, last_attempt_at = :last_attempt_at, updated_at = :updated_at
+				WHERE id = :id AND status = :expected_status AND updated_at = :expected_updated_at"
+			);
+			$mark->execute([
+				':attempts' => $attempts,
+				':last_attempt_at' => $now,
+				':updated_at' => $now,
+				':id' => (int)$delivery['id'],
+				':expected_status' => (string)$delivery['status'],
+				':expected_updated_at' => (string)$delivery['updated_at'],
+			]);
+			$db->commit();
+			if ($mark->rowCount() !== 1) {
+				return [];
+			}
+			$delivery['stored_status'] = (string)$delivery['status'];
+			$delivery['stored_attempts'] = $storedAttempts;
+			$delivery['status'] = 'processing';
+			$delivery['attempts'] = $attempts;
+			return $delivery;
+		} catch (\Throwable $e) {
+			if ($db instanceof \PDO && $db->inTransaction()) {
+				try {
+					$db->rollBack();
+				} catch (\Throwable $rollbackError) {
+					$this->logError('Webhook delivery worker could not roll back its database transaction.');
+				}
+			}
+			$this->logWarning(
+				'Webhook delivery worker failed while claiming a delivery (' . get_class($e) . ', code ' . (string)$e->getCode()
+				. '); registration monitoring will continue.'
+			);
+			return null;
+		}
+	}
+
+	private function pruneCompletedWebhookDeliveries(): void {
+		try {
+			$this->db()->exec("DELETE FROM registrationwatch_webhook_queue
+				WHERE status IN ('delivered', 'failed', 'suppressed')
+					AND created_at < DATE_SUB(NOW(), INTERVAL 30 DAY)");
+		} catch (\Throwable $e) {
+			$this->logWarning('Webhook delivery history pruning failed; monitoring will continue.');
+		}
+	}
+
+	private function processClaimedWebhookDelivery(
+		array $delivery,
+		string $now,
+		?callable $resolver,
+		?callable $transport,
+		?callable $completionTime = null
+	): void {
+		$completionTime = $completionTime ?? static function () use ($now): string {
+			return $now;
+		};
+		$deliveryId = (int)$delivery['id'];
+		$storedAttempts = (int)$delivery['stored_attempts'];
+		$attempts = (int)$delivery['attempts'];
+		try {
+			if ((string)$delivery['stored_status'] === 'processing' && $storedAttempts >= 3) {
 				$this->updateWebhookDelivery(
 					$deliveryId,
 					'failed',
@@ -4045,25 +4279,20 @@ class Registrationwatch implements \BMO {
 					$now,
 					$storedAttempts
 				);
-				$db->commit();
 				return;
 			}
-			$attempts = $storedAttempts + 1;
-			$mark = $db->prepare(
-				"UPDATE registrationwatch_webhook_queue
-				SET status = 'processing', attempts = :attempts, last_attempt_at = :last_attempt_at, updated_at = :updated_at
-				WHERE id = :id"
+
+			$current = $this->db()->prepare(
+				"SELECT COUNT(*) FROM registrationwatch_webhook_queue
+				WHERE id = :id AND status = 'processing' AND attempts = :attempts"
 			);
-			$mark->execute([
-				':attempts' => $attempts,
-				':last_attempt_at' => $now,
-				':updated_at' => $now,
-				':id' => $deliveryId,
-			]);
-			$db->commit();
+			$current->execute([':id' => $deliveryId, ':attempts' => $attempts]);
+			if ((int)$current->fetchColumn() !== 1) {
+				return;
+			}
 
 			if ((string)$delivery['alert_type'] === 'recovery') {
-				$priorStmt = $db->prepare(
+				$priorStmt = $this->db()->prepare(
 					"SELECT status
 					FROM registrationwatch_webhook_queue
 					WHERE destination_id = :destination_id
@@ -4084,91 +4313,208 @@ class Registrationwatch implements \BMO {
 				$problemPending = count(array_intersect(['pending', 'processing'], $priorStatuses)) > 0;
 				if (!$problemDelivered) {
 					if ($problemPending) {
-						$defer = $db->prepare(
-							"UPDATE registrationwatch_webhook_queue
-							SET status = 'pending', attempts = :attempts, next_attempt_at = :next_attempt_at, updated_at = :updated_at
-							WHERE id = :id"
+						$this->updateWebhookDelivery(
+							$deliveryId,
+							'pending',
+							null,
+							'Waiting for the corresponding problem notification.',
+							$now,
+							max(0, $attempts - 1),
+							date('Y-m-d H:i:s', strtotime($now) + 60),
+							$attempts
 						);
-						$defer->execute([
-							':attempts' => max(0, $attempts - 1),
-							':next_attempt_at' => date('Y-m-d H:i:s', strtotime($now) + 60),
-							':updated_at' => $now,
-							':id' => $deliveryId,
-						]);
 						return;
 					}
-					$this->updateWebhookDelivery($deliveryId, 'suppressed', null, 'No successful problem notification was delivered.', $now, $attempts);
+					$this->updateWebhookDelivery(
+						$deliveryId,
+						'suppressed',
+						null,
+						'No successful problem notification was delivered.',
+						$now,
+						$attempts
+					);
 					return;
 				}
 			}
 
-			$destination = $this->getWebhookDestination((string)$delivery['destination_id']);
-			if ($destination === null || empty($destination['enabled'])) {
-				$this->updateWebhookDelivery($deliveryId, 'suppressed', null, 'Destination disabled or removed.', $now, $attempts);
-				return;
-			}
-			$destination = $this->prepareWebhookDestination($destination);
-			if (isset($destination['error'])) {
-				$this->updateWebhookDelivery($deliveryId, 'failed', null, 'Saved authentication headers cannot be decrypted.', $now, $attempts);
-				return;
-			}
-			$payload = json_decode((string)$delivery['payload'], true);
-			if (!is_array($payload) || json_last_error() !== JSON_ERROR_NONE) {
-				$this->updateWebhookDelivery($deliveryId, 'failed', null, 'Stored notification payload is invalid.', $now, $attempts);
-				return;
-			}
-
-			if ($this->isMonitoringSnoozed()) {
-				$this->updateWebhookDelivery($deliveryId, 'suppressed', null, 'Monitoring is snoozed.', $now, $storedAttempts);
-				return;
-			}
-
-			$result = RegistrationwatchWebhook::deliver($destination, $payload, $resolver, $transport);
-			if (!empty($result['status'])) {
-				$this->updateWebhookDelivery($deliveryId, 'delivered', $result['http_status'], null, $now, $attempts);
-			} elseif (!empty($result['retryable']) && $attempts < 3) {
-				$delay = $attempts === 1 ? 60 : 300;
+			$destinationId = (string)$delivery['destination_id'];
+			if (!$this->acquireWebhookDestinationLock($destinationId, 0)) {
 				$this->updateWebhookDelivery(
 					$deliveryId,
 					'pending',
-					$result['http_status'],
-					(string)$result['error'],
-					date('Y-m-d H:i:s', strtotime($now) + $delay),
+					null,
+					'Destination configuration is being changed.',
+					$now,
+					$storedAttempts,
+					date('Y-m-d H:i:s', strtotime($now) + 60),
 					$attempts
 				);
-			} else {
-				$this->updateWebhookDelivery($deliveryId, 'failed', $result['http_status'], (string)$result['error'], $now, $attempts);
+				return;
+			}
+			try {
+				$claimAfterLock = $this->db()->prepare(
+					"SELECT COUNT(*) FROM registrationwatch_webhook_queue
+					WHERE id = :id AND status = 'processing' AND attempts = :attempts"
+				);
+				$claimAfterLock->execute([':id' => $deliveryId, ':attempts' => $attempts]);
+				if ((int)$claimAfterLock->fetchColumn() !== 1) {
+					return;
+				}
+				$destination = $this->getWebhookDestination($destinationId);
+				if ($destination === null || empty($destination['enabled'])) {
+					$this->updateWebhookDelivery($deliveryId, 'suppressed', null, 'Destination disabled or removed.', $now, $attempts);
+					return;
+				}
+				$queuedFingerprint = (string)($delivery['destination_fingerprint'] ?? '');
+				$currentFingerprint = $this->webhookDestinationDeliveryFingerprint($destination);
+				if ($queuedFingerprint === '') {
+					$this->updateWebhookDelivery(
+						$deliveryId,
+						'suppressed',
+						null,
+						'Destination configuration identity was not recorded for this delivery.',
+						$now,
+						$attempts
+					);
+					return;
+				}
+				if (!hash_equals($queuedFingerprint, $currentFingerprint)) {
+					$this->updateWebhookDelivery(
+						$deliveryId,
+						'suppressed',
+						null,
+						'Destination configuration changed before delivery.',
+						$now,
+						$attempts
+					);
+					return;
+				}
+				$destination = $this->prepareWebhookDestination($destination);
+				if (isset($destination['error'])) {
+					$this->updateWebhookDelivery($deliveryId, 'failed', null, 'Saved authentication headers cannot be decrypted.', $now, $attempts);
+					return;
+				}
+				$payload = json_decode((string)$delivery['payload'], true);
+				if (!is_array($payload) || json_last_error() !== JSON_ERROR_NONE) {
+					$this->updateWebhookDelivery($deliveryId, 'failed', null, 'Stored notification payload is invalid.', $now, $attempts);
+					return;
+				}
+				if ($this->isMonitoringSnoozed()) {
+					$this->updateWebhookDelivery(
+						$deliveryId,
+						'suppressed',
+						null,
+						'Monitoring is snoozed.',
+						$now,
+						$storedAttempts,
+						null,
+						$attempts
+					);
+					return;
+				}
+
+				$result = RegistrationwatchWebhook::deliver($destination, $payload, $resolver, $transport);
+				$completedAt = $completionTime();
+				if (!empty($result['status'])) {
+					$this->updateWebhookDelivery(
+						$deliveryId,
+						'delivered',
+						$result['http_status'],
+						null,
+						$completedAt,
+						$attempts,
+						null,
+						$attempts,
+						$now
+					);
+				} elseif (!empty($result['retryable']) && $attempts < 3) {
+					$this->updateWebhookDelivery(
+						$deliveryId,
+						'pending',
+						$result['http_status'],
+						(string)$result['error'],
+						$completedAt,
+						$attempts,
+						date('Y-m-d H:i:s', strtotime($completedAt) + ($attempts === 1 ? 60 : 300)),
+						$attempts,
+						$now
+					);
+				} else {
+					$this->updateWebhookDelivery(
+						$deliveryId,
+						'failed',
+						$result['http_status'],
+						(string)$result['error'],
+						$completedAt,
+						$attempts,
+						null,
+						$attempts,
+						$now
+					);
+				}
+			} finally {
+				$this->releaseWebhookDestinationLock($destinationId);
 			}
 		} catch (\Throwable $e) {
-			if ($db instanceof \PDO && $db->inTransaction()) {
-				try {
-					$db->rollBack();
-				} catch (\Throwable $rollbackError) {
-					$this->logError('Webhook delivery worker could not roll back its database transaction.');
-				}
-			}
+			$completedAt = $completionTime();
 			$this->logWarning(
-				'Webhook delivery worker failed (' . get_class($e) . ', code ' . (string)$e->getCode()
-				. '); registration monitoring will continue.'
+				'Webhook delivery ' . $deliveryId . ' failed (' . get_class($e) . ', code ' . (string)$e->getCode()
+				. '); remaining batch deliveries will continue.'
 			);
+			try {
+				$this->updateWebhookDelivery(
+					$deliveryId,
+					$attempts < 3 ? 'pending' : 'failed',
+					null,
+					'Delivery worker encountered an unexpected error.',
+					$completedAt,
+					$attempts,
+					$attempts < 3 ? date('Y-m-d H:i:s', strtotime($completedAt) + ($attempts === 1 ? 60 : 300)) : null,
+					$attempts,
+					$now
+				);
+			} catch (\Throwable $updateError) {
+				$this->logError('Webhook delivery ' . $deliveryId . ' could not record its worker failure.');
+			}
 		}
 	}
 
-	private function updateWebhookDelivery(int $id, string $status, ?int $httpStatus, ?string $error, string $updatedAt, int $attempts): void {
+	private function updateWebhookDelivery(
+		int $id,
+		string $status,
+		?int $httpStatus,
+		?string $error,
+		string $updatedAt,
+		int $attempts,
+		?string $nextAttemptAt = null,
+		?int $expectedClaimAttempts = null,
+		?string $expectedClaimUpdatedAt = null
+	): bool {
+		$expectedClaimAttempts = $expectedClaimAttempts ?? $attempts;
+		$expectedClaimUpdatedAt = $expectedClaimUpdatedAt ?? $updatedAt;
 		$stmt = $this->db()->prepare(
 			'UPDATE registrationwatch_webhook_queue
 			SET status = :status, http_status = :http_status, last_error = :last_error,
-				attempts = :attempts, updated_at = :updated_at
-			WHERE id = :id'
+				attempts = :attempts,
+				next_attempt_at = COALESCE(:next_attempt_at, next_attempt_at),
+				updated_at = :updated_at
+			WHERE id = :id
+				AND status = \'processing\'
+				AND attempts = :expected_claim_attempts
+				AND updated_at = :expected_claim_updated_at'
 		);
 		$stmt->execute([
 			':status' => $status,
 			':http_status' => $httpStatus,
 			':last_error' => $error === null ? null : substr($error, 0, 512),
 			':attempts' => $attempts,
+			':next_attempt_at' => $nextAttemptAt,
 			':updated_at' => $updatedAt,
 			':id' => $id,
+			':expected_claim_attempts' => $expectedClaimAttempts,
+			':expected_claim_updated_at' => $expectedClaimUpdatedAt,
 		]);
+		return $stmt->rowCount() === 1;
 	}
 
 	private function alertTypeForTransition(array $transition, array $settings): ?string {
@@ -4335,14 +4681,23 @@ class Registrationwatch implements \BMO {
 		]);
 	}
 
-	private function collectDueReminderAlerts(string $now, array $settings, array $recipients): array {
-		$result = ['alerts' => [], 'cycles' => []];
-		if ($settings['alert_enabled'] !== '1' || !$recipients) {
+	private function collectDueReminderAlerts(
+		string $now,
+		array $settings,
+		array $recipients,
+		bool $canSendWebhook = false,
+		?callable $liveContactLoader = null
+	): array {
+		$result = ['alerts' => [], 'cycles' => [], 'webhook_reminders' => []];
+		$canSendEmail = $settings['alert_enabled'] === '1' && (bool)$recipients;
+		if (!$canSendEmail && !$canSendWebhook) {
 			return $result;
 		}
 
 		try {
-			$liveContacts = $this->getLiveContacts();
+			$liveContacts = $liveContactLoader !== null
+				? $liveContactLoader()
+				: $this->getLiveContacts();
 		} catch (\Throwable $e) {
 			$this->logWarning('Reminder pass skipped because live registration status is unavailable: ' . $e->getMessage());
 			return $result;
@@ -4406,48 +4761,68 @@ class Registrationwatch implements \BMO {
 
 			$reminderN = ((int)$row['alert_count']) + 1;
 			$transition = $this->buildReminderTransition($row, $currentStatus, $now);
-			$email = $this->buildAlertEmail($transition, $alertType);
 			$reservedAny = false;
 
-			foreach ($recipients as $recipient) {
-				$reserved = $this->reserveAlertHistory([
-					'registration_id' => (int)$row['registration_id'],
-					'registration_key' => $row['registration_key'],
-					'extension' => $row['extension'],
-					'history_id' => (int)$row['history_id'],
-					'reminder_n' => $reminderN,
-					'alert_type' => $alertType,
-					'status' => $currentStatus,
-					'contact_uri' => $row['contact_uri'] ?? null,
-					'recipient' => $recipient,
-					'subject' => $email['subject'],
-					'message' => $email['message'],
-					'sent_at' => $now,
-					'result' => 'pending',
-					'error' => null,
-				]);
-				if (!$reserved) {
-					continue;
-				}
+			if ($canSendEmail) {
+				$email = $this->buildAlertEmail($transition, $alertType);
+				foreach ($recipients as $recipient) {
+					$reserved = $this->reserveAlertHistory([
+						'registration_id' => (int)$row['registration_id'],
+						'registration_key' => $row['registration_key'],
+						'extension' => $row['extension'],
+						'history_id' => (int)$row['history_id'],
+						'reminder_n' => $reminderN,
+						'alert_type' => $alertType,
+						'status' => $currentStatus,
+						'contact_uri' => $row['contact_uri'] ?? null,
+						'recipient' => $recipient,
+						'subject' => $email['subject'],
+						'message' => $email['message'],
+						'sent_at' => $now,
+						'result' => 'pending',
+						'error' => null,
+					]);
+					if (!$reserved) {
+						continue;
+					}
 
-				$reservedAny = true;
-				$result['alerts'][] = [
-					'registration_id' => (int)$row['registration_id'],
-					'registration_key' => (string)$row['registration_key'],
-					'extension' => (string)$row['extension'],
-					'history_id' => (int)$row['history_id'],
-					'reminder_n' => $reminderN,
-					'alert_type' => $alertType,
-					'status' => $currentStatus,
-					'contact_uri' => $row['contact_uri'] ?? null,
-					'recipient' => $recipient,
-					'subject' => $email['subject'],
-					'message' => $email['message'],
-					'source' => 'reminder',
-				];
+					$reservedAny = true;
+					$result['alerts'][] = [
+						'registration_id' => (int)$row['registration_id'],
+						'registration_key' => (string)$row['registration_key'],
+						'extension' => (string)$row['extension'],
+						'history_id' => (int)$row['history_id'],
+						'reminder_n' => $reminderN,
+						'alert_type' => $alertType,
+						'status' => $currentStatus,
+						'contact_uri' => $row['contact_uri'] ?? null,
+						'recipient' => $recipient,
+						'subject' => $email['subject'],
+						'message' => $email['message'],
+						'source' => 'reminder',
+					];
+				}
 			}
 
-			if ($reservedAny) {
+			$queuedWebhookReminder = false;
+			if ($canSendWebhook) {
+				$webhookTransition = $transition;
+				try {
+					$historicalTransition = $this->getWebhookTransitionById((int)$row['history_id']);
+					if ($historicalTransition !== null) {
+						$webhookTransition = $historicalTransition;
+						$webhookTransition['to_state'] = $currentStatus;
+						$webhookTransition['reason'] = 'reminder';
+						$webhookTransition['reminder_n'] = $reminderN;
+						$webhookTransition['alert_type'] = $alertType;
+					}
+				} catch (\Throwable $e) {
+					$this->logWarning('Webhook reminder context lookup failed; the reminder will use the current registration state.');
+				}
+				$result['webhook_reminders'][] = $webhookTransition;
+				$queuedWebhookReminder = true;
+			}
+			if ($reservedAny || $queuedWebhookReminder) {
 				$result['cycles'][(int)$row['id']] = [
 					'row' => $row,
 					'reminder_n' => $reminderN,
@@ -4458,9 +4833,46 @@ class Registrationwatch implements \BMO {
 		return $result;
 	}
 
-	private function dispatchCollectedAlerts(array $alerts, array $reminderCycles, array $settings, array $recipients, string $now): void {
-		if (!$alerts) {
+	private function dispatchCollectedAlerts(
+		array $alerts,
+		array $reminderCycles,
+		array $settings,
+		array $recipients,
+		string $now,
+		array $webhookReminders = []
+	): void {
+		if (!$alerts && !$webhookReminders) {
 			return;
+		}
+
+		$remindersToQueue = $webhookReminders;
+		if (!$remindersToQueue) {
+			try {
+				foreach ($alerts as $alert) {
+					if ((string)($alert['source'] ?? '') !== 'reminder') {
+						continue;
+					}
+					$transition = $this->getWebhookTransitionById((int)$alert['history_id']);
+					if ($transition === null) {
+						continue;
+					}
+					$transition['to_state'] = (string)$alert['status'];
+					$transition['reason'] = 'reminder';
+					$transition['reminder_n'] = (int)($alert['reminder_n'] ?? 0);
+					$transition['alert_type'] = (string)$alert['alert_type'];
+					$remindersToQueue[] = $transition;
+				}
+			} catch (\Throwable $e) {
+				$this->logWarning('Webhook reminder lookup failed; email notification processing will continue.');
+			}
+		}
+		foreach ($remindersToQueue as $transition) {
+			$this->queueWebhookEvent(
+				$transition,
+				(string)$transition['alert_type'],
+				(int)($transition['reminder_n'] ?? 0),
+				(int)$transition['id']
+			);
 		}
 
 		if ($this->isMonitoringSnoozed()) {
@@ -4477,28 +4889,6 @@ class Registrationwatch implements \BMO {
 			}
 			$this->markReminderCyclesComplete($reminderCycles, $now);
 			return;
-		}
-
-		try {
-			foreach ($alerts as $alert) {
-				if ((string)($alert['source'] ?? '') !== 'reminder') {
-					continue;
-				}
-				$transition = $this->getWebhookTransitionById((int)$alert['history_id']);
-				if ($transition === null) {
-					continue;
-				}
-				$transition['to_state'] = (string)$alert['status'];
-				$transition['reason'] = 'reminder';
-				$this->queueWebhookEvent(
-					$transition,
-					(string)$alert['alert_type'],
-					(int)($alert['reminder_n'] ?? 0),
-					(int)$alert['history_id']
-				);
-			}
-		} catch (\Throwable $e) {
-			$this->logWarning('Webhook reminder could not be queued; email notification processing will continue.');
 		}
 
 		$threshold = $this->stormThreshold($settings);
@@ -5084,6 +5474,7 @@ class Registrationwatch implements \BMO {
 			'created_at' => $row['active_since'] ?: $now,
 			'repeat_mode' => (string)($row['repeat_mode'] ?? ''),
 			'reminder_n' => ((int)($row['alert_count'] ?? 0)) + 1,
+			'alert_type' => $this->reminderAlertTypeForStatus($currentStatus),
 		];
 	}
 
@@ -6197,7 +6588,13 @@ class Registrationwatch implements \BMO {
 	}
 
 	public function runWebhookDeliveryWorker(): bool {
-		$this->processWebhookQueue($this->now());
+		$this->processWebhookQueue(
+			$this->now(),
+			null,
+			null,
+			null,
+			self::WEBHOOK_WORKER_BATCH_LIMIT
+		);
 		return true;
 	}
 

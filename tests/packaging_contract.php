@@ -8,6 +8,22 @@ function package_assert(bool $condition, string $message): void {
 	}
 }
 
+function packageRemoveTree(string $path): void {
+	if (!file_exists($path) && !is_link($path)) {
+		return;
+	}
+	$iterator = new RecursiveIteratorIterator(
+		new RecursiveDirectoryIterator($path, FilesystemIterator::SKIP_DOTS),
+		RecursiveIteratorIterator::CHILD_FIRST
+	);
+	foreach ($iterator as $entry) {
+		$entry->isDir() && !$entry->isLink()
+			? rmdir($entry->getPathname())
+			: unlink($entry->getPathname());
+	}
+	rmdir($path);
+}
+
 $root = dirname(__DIR__);
 $moduleXml = simplexml_load_file($root . '/module.xml');
 package_assert($moduleXml !== false, 'module.xml should parse for the package contract.');
@@ -69,19 +85,74 @@ try {
 	$secondHash = hash_file('sha256', $archivePath);
 	package_assert($firstHash === $secondHash, 'Repeated package generation should produce byte-identical archives.');
 
+	$releaseParent = $temporaryDirectory . '/release';
+	$stage = $releaseParent . '/registrationwatch';
+	$stageCommand = escapeshellarg(PHP_BINARY)
+		. ' ' . escapeshellarg($builder)
+		. ' --stage --stage-dir=' . escapeshellarg($stage);
+	exec($stageCommand, $stageOutput, $stageStatus);
+	package_assert($stageStatus === 0 && is_dir($stage), 'The builder should construct an isolated production staging directory.');
+	$stagedPackageCommand = escapeshellarg(PHP_BINARY)
+		. ' ' . escapeshellarg($builder)
+		. ' --unsigned --stage-dir=' . escapeshellarg($stage)
+		. ' --output-dir=' . escapeshellarg($temporaryDirectory);
+	exec($stagedPackageCommand, $stagedPackageOutput, $stagedPackageStatus);
+	package_assert(
+		$stagedPackageStatus === 0 && hash_file('sha256', $archivePath) === $firstHash,
+		'Packaging an unchanged explicit stage should reproduce the same verified archive bytes.'
+	);
+
+	$stagedReadme = $stage . '/README.md';
+	$originalReadme = file_get_contents($stagedReadme);
+	package_assert(is_string($originalReadme), 'The staged README should be readable.');
+	file_put_contents($stagedReadme, $originalReadme . "\nstaged mutation\n");
+	exec($stagedPackageCommand, $modifiedStageOutput, $modifiedStageStatus);
+	package_assert(
+		$modifiedStageStatus !== 0,
+		'Unsigned packaging should reject a stage that no longer matches the finalised source.'
+	);
+	file_put_contents($stagedReadme, $originalReadme);
+
+	$tamperRoot = $temporaryDirectory . '/tamper';
+	mkdir($tamperRoot, 0700, true);
+	exec(
+		'tar -xzf ' . escapeshellarg($archivePath) . ' --directory ' . escapeshellarg($tamperRoot),
+		$extractOutput,
+		$extractStatus
+	);
+	package_assert($extractStatus === 0, 'The verified archive should extract for tamper testing.');
+	file_put_contents(
+		$tamperRoot . '/registrationwatch/README.md',
+		(string)file_get_contents($tamperRoot . '/registrationwatch/README.md') . "\narchive mutation\n"
+	);
+	$tamperedPath = $temporaryDirectory . '/registrationwatch-1.5.0-tampered.tgz';
+	exec(
+		'tar -czf ' . escapeshellarg($tamperedPath)
+		. ' --directory ' . escapeshellarg($tamperRoot) . ' registrationwatch',
+		$tamperOutput,
+		$tamperStatus
+	);
+	package_assert($tamperStatus === 0, 'The tampered fixture archive should be constructible.');
+	$verifyTamperedCommand = escapeshellarg(PHP_BINARY)
+		. ' ' . escapeshellarg($builder)
+		. ' --verify-unsigned-archive=' . escapeshellarg($tamperedPath)
+		. ' --stage-dir=' . escapeshellarg($stage);
+	exec($verifyTamperedCommand, $tamperVerifyOutput, $tamperVerifyStatus);
+	package_assert(
+		$tamperVerifyStatus !== 0,
+		'Independent archive verification should detect altered extracted bytes.'
+	);
+
+	copy($root . '/module.sig', $stage . '/module.sig');
 	$signedCommand = escapeshellarg(PHP_BINARY)
 		. ' ' . escapeshellarg($builder)
-		. ' --signed --output-dir=' . escapeshellarg($temporaryDirectory);
+		. ' --signed --stage-dir=' . escapeshellarg($stage)
+		. ' --output-dir=' . escapeshellarg($temporaryDirectory);
 	exec($signedCommand, $signedOutput, $signedStatus);
-	package_assert($signedStatus !== 0, 'A stale signature or unavailable signing credentials must fail signed packaging safely.');
+	package_assert($signedStatus !== 0, 'A missing, stale, or unavailable production signature must fail signed packaging safely.');
 	package_assert(!is_file($temporaryDirectory . '/registrationwatch-1.5.0.tgz'), 'Failed signed packaging must not leave a release-named archive.');
 } finally {
-	foreach (glob($temporaryDirectory . '/*') as $path) {
-		if (is_file($path)) {
-			unlink($path);
-		}
-	}
-	rmdir($temporaryDirectory);
+	packageRemoveTree($temporaryDirectory);
 }
 
 echo "Packaging contract passed.\n";

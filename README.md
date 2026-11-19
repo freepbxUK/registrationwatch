@@ -314,8 +314,8 @@ publishing or deploying an update.
 
 ## Building release archives
 
-The package builder stages an explicit production-file list under the required
-`registrationwatch/` archive directory. It excludes Git metadata, tests,
+The package builder stages an explicit production-file list in an isolated
+directory named `registrationwatch/`. It excludes Git metadata, tests,
 packaging scripts, temporary files, and the checked-in 1.4.4 signature. Tar
 ownership, timestamps, file ordering, and gzip timestamps are normalized so
 repeated builds from identical files are byte-for-byte reproducible.
@@ -327,36 +327,42 @@ php scripts/package.php --unsigned --output-dir=dist
 ```
 
 This creates `dist/registrationwatch-1.5.0-unsigned.tgz`. It is not a signed
-release and must not be published as production-ready. The script refuses
-signed mode unless `module.sig` verifies with the existing signer fingerprint
-and its signed per-file hashes match the complete production package list:
+release and must not be published as production-ready.
+
+The production signing sequence is:
 
 ```sh
-php scripts/package.php --signed --output-dir=dist
+php scripts/package.php --stage --stage-dir=/safe/path/registrationwatch
+# The authorised signer signs the actual files in /safe/path/registrationwatch.
+chmod -R a-w /safe/path/registrationwatch
+php scripts/package.php --signed --stage-dir=/safe/path/registrationwatch --output-dir=dist --checksum
 ```
 
-Before a signed build, the authorized signer must generate a new signature for
-the final 1.5.0 production files using the established FreePBX Module Signing
-v2 workflow and existing developer identity. Do not copy the 1.4.4 signature,
-generate replacement keys, or commit private signing material. The signed
-builder requires the existing public key in the local GPG keyring and fails
-closed if verification or manifest checks fail. The manually dispatched
-GitHub Actions workflow creates only a clearly named unsigned review artifact;
-it has no release or publication step.
+The authorised signer must generate a new signature for that staged file set
+using the established FreePBX Module Signing v2 workflow and developer
+identity. Do not copy the 1.4.4 signature, generate replacement keys, or commit
+private signing material. Signed mode requires the existing public key,
+requires the stage to be read-only, and verifies the signed manifest before it
+archives the same directory. It then extracts the archive independently,
+verifies file coverage, hashes, and the extracted signature, and writes the
+`.sha256` file only after those checks succeed. The builder also rejects any
+staging/source mismatch and any staging change during archive construction.
+The manually dispatched GitHub Actions workflow creates only a clearly named
+unsigned review artifact; it has no release or publication step.
 
 After publishing the signed package asset, generate the remote update metadata:
 
 ```sh
-php scripts/update-metadata.php --output-dir=dist
+php scripts/update-metadata.php --stage-dir=/safe/path/registrationwatch --output-dir=dist
 ```
 
-The generator fails if signing credentials are missing, the published GitHub
-Release asset is unavailable or differs from the signed local package, or the
-new version regresses from the existing root `version.json`. It writes
-`dist/version.json` only after validation. Publish the release asset first;
-then review and place the generated `version.json` at the repository root so
-the configured feed starts advertising that available package. This command
-does not publish either artifact.
+The generator fails if signing credentials are missing, the frozen stage is
+unavailable, the published GitHub Release asset is unavailable or differs from
+the signed local package, or the new version regresses from the existing root
+`version.json`. It writes `dist/version.json` only after validation. Publish
+the release asset first; then review and place the generated `version.json` at
+the repository root so the configured feed starts advertising that available
+package. This command does not publish either artifact.
 
 ## Webhooks
 
@@ -462,23 +468,41 @@ backups protected.
 
 The **Test** action sends a clearly marked `registration.test` event using the
 selected destination's saved settings. It does not enqueue a monitoring event
-or change registration state. A test succeeds only for an HTTP 2xx response;
-the interface reports the HTTP status or a sanitized connection/validation
-error. The request has a two-second connect timeout and five-second total
-timeout.
+or change registration state, and it is not recorded in the database-backed
+**Recent webhook deliveries** table. A test succeeds only for an HTTP 2xx
+response; the interface reports the HTTP status or a sanitized
+connection/validation error. The request has a two-second connect timeout and
+five-second total timeout.
 
 Monitoring notifications enter a database queue and are sent by a separate
 FreePBX webhook-delivery job; the registration-monitor job only reconciles
-registrations and queues events. One queued delivery is attempted per webhook
-job run, with a two-second DNS resolution deadline, a five-second request
-timeout, a maximum of three attempts
-(initial attempt plus retries after 60 and 300 seconds), and no redirects.
+registrations and queues events. Up to six queued deliveries are attempted per
+webhook job run, subject to a 12-second execution budget. The worker reserves
+seven seconds for the final in-flight delivery and stops claiming new work once
+only that reserve remains. Each delivery retains a two-second DNS resolution
+deadline and five-second request timeout, so the conservative worst-case
+network runtime is 12 seconds plus database overhead. Retryable failures
+are scheduled 60 seconds after the first attempt and 300 seconds after the
+second attempt, with at most three attempts in total. Redirects are not
+followed.
 DNS resolution failures, transient connection errors, HTTP 408/429, and HTTP
 5xx are retried; other non-2xx responses fail. At most 5,000 deliveries can be
 pending/in progress,
 and the table is bounded at 10,000 rows by removing completed entries when
-needed. Old completed records are pruned after 30 days when the queue is idle.
+needed. At the normal once-per-minute schedule, six successful fast deliveries
+per run provide an upper-bound throughput of 360 deliveries per hour; draining
+5,000 due entries can therefore take about 14 hours even without additional
+arrivals or slow endpoints. Old completed records are pruned after 30 days
+when the queue is idle.
 Recent status, attempts, HTTP status, and sanitized errors appear in the GUI.
+Changes to a destination's URL, method, authentication headers, enabled state,
+or private-network permission suppress older pending and processing queue
+entries before activation, so they cannot be redirected to the new delivery
+identity. Name and payload-template edits preserve queued payloads. On
+FreePBX/MySQL, per-destination locks ensure an in-flight request completes under
+its original configuration or the edit waits; a later edit suppresses the
+remaining old entries. The operation fails safely if that lock cannot be
+obtained.
 
 Delivery is at-least-once: if an endpoint processes an event but the PBX loses
 the response, a retry can deliver it again. A process interrupted during
@@ -665,10 +689,10 @@ records transitions, and queues eligible email and webhook notifications. It
 does not make webhook HTTP requests.
 
 `registrationwatch :: webhooks` is implemented by
-`\FreePBX\modules\Registrationwatch\WebhookJob`. It processes at most one
-queued webhook delivery per run, including retry scheduling and delivery
-history updates. Both jobs are scheduled once per minute by the FreePBX Job
-runner.
+`\FreePBX\modules\Registrationwatch\WebhookJob`. It processes at most six
+queued webhook deliveries per run, stops after its 12-second pre-claim budget
+is exhausted, and handles retry scheduling and delivery history updates. Both
+jobs are scheduled once per minute by the FreePBX Job runner.
 
 Check that both jobs are registered:
 
@@ -742,9 +766,14 @@ under the configured repeat mode.
 and logical event. Its states are `pending`, `processing`, `delivered`,
 `failed`, and `suppressed`. It records the payload, attempt count, next retry
 time, last attempt, HTTP status, and bounded error text; its recent rows are
-shown as webhook delivery history. Transient connection failures, HTTP 408,
-429, and 5xx responses are retried up to three attempts. Only one delivery is
-attempted by each webhook-job run.
+shown as webhook delivery history. Each row also stores a non-secret SHA-256
+fingerprint of the destination delivery identity used when its payload was
+prepared. The worker suppresses a row if that identity no longer matches, so a
+notification inserted after an administrator's suppression pass cannot be
+redirected to replacement URL, authentication, method, or private-network
+settings. Transient connection failures, HTTP 408,
+429, and 5xx responses are retried up to three attempts. At most six
+deliveries are attempted by each webhook-job run.
 
 The queue is limited to 5,000 pending/processing rows and 10,000 rows total.
 When the total limit is reached, old terminal rows (`delivered`, `failed`, or
@@ -752,10 +781,14 @@ When the total limit is reached, old terminal rows (`delivered`, `failed`, or
 pending/processing or total limit still prevents insertion, new webhook events
 are not queued and a warning is logged. Terminal rows older than 30 days are
 removed during an idle worker pass. An upgrade creates this table if it does
-not exist and widens the settings value column for webhook configuration; it
-does not reset existing settings, monitoring selections, registrations, or
-notification history. Uninstallation drops the webhook queue along with the
-other `registrationwatch_*` tables.
+not exist, widens the settings value column for webhook configuration, and
+adds the destination fingerprint for an existing 1.5.0 queue. Outstanding
+pending or processing legacy deliveries without a verifiable fingerprint are
+suppressed rather than being assigned a fingerprint from potentially changed
+current destination settings. Completed delivered, failed, and suppressed
+delivery history is preserved. The upgrade does not reset existing settings,
+monitoring selections, registrations, or notification history. Uninstallation
+drops the webhook queue along with the other `registrationwatch_*` tables.
 
 ## Alerting
 
@@ -945,6 +978,10 @@ FreePBX module access.
 * Configurable email subject/body templates are deferred; existing email content and transport behavior are unchanged.
 * Short flaps can be missed between reconciliation runs.
 * Email delivery depends on the PBX mail sender and relay setup.
+* The established email alert-history reservation model predates 1.5.0 and
+  does not recover a `pending` row if the process is interrupted between
+  reservation and delivery. This is a separately tracked pre-existing issue;
+  1.5.0 webhook remediation does not change the email delivery state machine.
 * Webhook hostname lookups use a bounded direct DNS exchange with a monotonic 2-second deadline and fail closed on timeout, missing `hrtime()`, or invalid responses. HTTP delivery separately has a 2-second connect timeout and a 5-second overall timeout.
 * Webhook Storm Threshold batching is not implemented; the email Storm Threshold applies to email summaries only.
 * Snooze Monitoring is global, not per-registration.
@@ -994,15 +1031,16 @@ php tests/update_metadata_contract.php
 Build and checksum the unsigned development archive:
 
 ```sh
-php scripts/package.php --unsigned --output-dir=dist
-sha256sum dist/registrationwatch-1.5.0-unsigned.tgz > dist/registrationwatch-1.5.0-unsigned.tgz.sha256
+php scripts/package.php --unsigned --output-dir=dist --checksum
 sha256sum --check dist/registrationwatch-1.5.0-unsigned.tgz.sha256
 ```
 
-The package builder validates the archive structure. The packaging contract
-builds the archive twice and compares the bytes to check reproducibility. The
-webhook tests use stubbed DNS and HTTP transports, and the update-metadata
-contract uses local files only; these tests make no external requests.
+The package builder validates the staging file set, archive structure, and an
+independent extraction before writing the checksum. The packaging contract
+builds the archive twice and compares the bytes to check reproducibility, then
+checks staged mutations and archive tampering. The webhook tests use stubbed
+DNS and HTTP transports, and the update-metadata contract uses local files only;
+these tests make no external requests.
 
 ### Installed FreePBX verification
 
@@ -1034,9 +1072,10 @@ fwconsole job --run=<job_id> --force
 Confirm that the list contains `registrationwatch :: monitor` and
 `registrationwatch :: webhooks`. Run the listed ID for each job. Verify that
 registration monitoring updates the Registration Watch page and Status
-History. As a full FreePBX administrator, send a webhook test from the
-Webhooks section and confirm its result in Recent webhook deliveries. Before
-and after an upgrade, compare the existing monitoring selections, settings,
+History. As a full FreePBX administrator, send a webhook test from the Webhooks
+section and confirm the direct AJAX result. Test events are not persisted in
+Recent webhook deliveries. Before and after an upgrade, compare the existing
+monitoring selections, settings,
 registrations, and notification history; upgrade without uninstalling.
 
 ## Uninstalling
@@ -1063,16 +1102,18 @@ safe JSON template substitution, encrypted authentication headers, and
 administrator-only destination configuration, testing, and delivery history.
 Delivery uses a separate FreePBX webhook job, isolated from registration
 monitoring and email sending, with bounded DNS resolution, DNS/IP-based SSRF
-protection, a persistent queue, bounded retries, event identifiers, and
-delivery status history. Webhook events follow Registration Watch's existing
-eligibility rules for watched registrations, transitions, debounce, snooze,
-alert types, and recovery.
+protection, a persistent queue, correctly scheduled bounded retries, small
+bounded batches, event identifiers, and delivery status history. Destination
+edits cannot silently redirect previously queued events. Webhook events follow
+Registration Watch's existing eligibility rules for watched registrations,
+transitions, debounce, snooze, repeat reminders, alert types, and recovery.
 Existing monitoring selections, settings, notification history, and email
 delivery behaviour are preserved during upgrade.
 
 Adds a repeatable `.tgz` package builder with explicit production-file
-inclusion, deterministic archive metadata, structure checks, and fail-closed
-signed-package validation. The checked-in 1.4.4 signature is not reused; the
+inclusion, deterministic archive metadata, a frozen signed staging workflow,
+independent extraction and signature/hash verification, structure checks, and
+post-verification checksums. The checked-in 1.4.4 signature is not reused; the
 local 1.5.0 development archive and manually dispatched CI artifact are
 explicitly unsigned and review-only. Native FreePBX 16/17 update discovery is
 configured, but the development build does not publish `version.json` or

@@ -135,6 +135,7 @@ $sql[] = "CREATE TABLE IF NOT EXISTS registrationwatch_webhook_queue (
 	registration_id INT UNSIGNED NOT NULL,
 	history_id BIGINT UNSIGNED NOT NULL,
 	incident_start_history_id BIGINT UNSIGNED NOT NULL,
+	destination_fingerprint CHAR(64) NULL,
 	alert_type VARCHAR(40) NOT NULL,
 	event_type VARCHAR(80) NOT NULL,
 	payload TEXT NOT NULL,
@@ -177,6 +178,52 @@ $defaultSettings = [
 	'alert_history_prune_policy' => 'never',
 ];
 
+$rwFetchAssocRow = static function ($result) {
+	if (!$result || !is_object($result)) {
+		return null;
+	}
+
+	if (method_exists($result, 'fetchRow')) {
+		if (defined('DB_FETCHMODE_ASSOC')) {
+			$row = $result->fetchRow(DB_FETCHMODE_ASSOC);
+		} else {
+			$row = $result->fetchRow();
+		}
+		return is_array($row) ? $row : null;
+	}
+
+	if (method_exists($result, 'fetch')) {
+		$row = $result->fetch();
+		return is_array($row) ? $row : null;
+	}
+
+	return null;
+};
+
+$fingerprintColumnResult = $db->query(
+	"SELECT COUNT(*) AS column_count
+	FROM information_schema.COLUMNS
+	WHERE TABLE_SCHEMA = DATABASE()
+		AND TABLE_NAME = 'registrationwatch_webhook_queue'
+		AND COLUMN_NAME = 'destination_fingerprint'"
+);
+$fingerprintColumn = $rwFetchAssocRow($fingerprintColumnResult);
+if ((int)($fingerprintColumn['column_count'] ?? 0) === 0) {
+	$db->query(
+		'ALTER TABLE registrationwatch_webhook_queue
+		ADD COLUMN destination_fingerprint CHAR(64) NULL AFTER incident_start_history_id'
+	);
+}
+
+$db->query(
+	"UPDATE registrationwatch_webhook_queue
+	SET status = 'suppressed',
+		last_error = 'Legacy notification suppressed: original destination configuration cannot be verified.',
+		updated_at = NOW()
+	WHERE (destination_fingerprint IS NULL OR destination_fingerprint = '')
+		AND status IN ('pending', 'processing')"
+);
+
 foreach ($defaultSettings as $key => $value) {
 	$stmt = $db->prepare('INSERT IGNORE INTO registrationwatch_settings (setting_key, setting_value, updated_at) VALUES (:setting_key, :setting_value, :updated_at)');
 	$stmt->execute([
@@ -189,40 +236,6 @@ foreach ($defaultSettings as $key => $value) {
 // One-time migration: move legacy row-level enabled state to explicit
 // extension-level monitoring setting keys.
 $migrationMarkerKey = 'extension_monitoring_state_migrated_v1';
-
-$rwFetchAssocRow = static function ($result) {
-	if (!$result || !is_object($result)) {
-		return null;
-	}
-
-	if (method_exists($result, 'fetchRow')) {
-		if (defined('DB_FETCHMODE_ASSOC')) {
-			$row = $result->fetchRow(DB_FETCHMODE_ASSOC);
-		} else {
-			$row = $result->fetchRow();
-		}
-		if ($row === false || $row === null) {
-			return null;
-		}
-		if (is_array($row)) {
-			return $row;
-		}
-		return null;
-	}
-
-	if (method_exists($result, 'fetch')) {
-		$row = $result->fetch();
-		if ($row === false || $row === null) {
-			return null;
-		}
-		if (is_array($row)) {
-			return $row;
-		}
-		return null;
-	}
-
-	return null;
-};
 
 $rwFetchFirstValue = static function ($result) use ($rwFetchAssocRow) {
 	$row = $rwFetchAssocRow($result);
